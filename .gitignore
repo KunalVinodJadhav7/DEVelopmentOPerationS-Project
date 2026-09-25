@@ -1,0 +1,29 @@
+# Environment variables / secrets
+.env
+.env.*
+!.env.example
+
+# Python virtual environments
+.venv/
+venv/
+.ci-venv/
+
+# Python cache / compiled files
+__pycache__/
+*.py[cod]
+
+# Testing
+.pytest_cache/
+test-results/
+
+# Databases
+*.db
+*.sqlite
+*.sqlite3
+
+# Build / Gradle output
+build/
+.gradle/
+
+# User-uploaded files
+uploads/

@@ -1,0 +1,52 @@
+- name: Provision Employee Leave Approval System host
+  hosts: app
+  become: true
+  vars:
+    app_dir: /opt/leave-approval-system
+  tasks:
+    - name: Install required packages
+      ansible.builtin.apt:
+        name:
+          - docker.io
+          - docker-compose-plugin
+          - curl
+        state: present
+        update_cache: true
+
+    - name: Ensure Docker service is enabled and started
+      ansible.builtin.service:
+        name: docker
+        state: started
+        enabled: true
+
+    - name: Create application directory
+      ansible.builtin.file:
+        path: "{{ app_dir }}"
+        state: directory
+        mode: '0755'
+
+    - name: Create uploads directory
+      ansible.builtin.file:
+        path: "{{ app_dir }}/uploads"
+        state: directory
+        mode: '0755'
+
+    - name: Copy release marker
+      ansible.builtin.copy:
+        dest: "{{ app_dir }}/RELEASE"
+        content: "{{ lookup('env', 'BUILD_NUMBER') | default('local', true) }}\n"
+        mode: '0644'
+
+    - name: Validate Docker installation
+      ansible.builtin.command: docker --version
+      changed_when: false
+
+    - name: Validate Docker Compose installation
+      ansible.builtin.command: docker compose version
+      changed_when: false
+
+    - name: Validate application directory idempotency
+      ansible.builtin.stat:
+        path: "{{ app_dir }}"
+      register: app_dir_state
+      changed_when: false

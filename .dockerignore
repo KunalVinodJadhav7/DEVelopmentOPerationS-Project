@@ -1,0 +1,12 @@
+.git
+.gitignore
+.venv
+.ci-venv
+.gradle
+build
+__pycache__
+*.pyc
+*.db
+uploads
+test-results
+.env

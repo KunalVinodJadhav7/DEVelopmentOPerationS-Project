@@ -1,0 +1,95 @@
+plugins {
+    id 'base'
+}
+
+group = 'com.leaveflow'
+version = project.findProperty('appVersion') ?: '1.0.0'
+
+def isWindows = System.getProperty('os.name').toLowerCase().contains('windows')
+def pythonCommand = isWindows ? 'python' : 'python3'
+def venvDir = file('.ci-venv')
+def venvPython = file(isWindows ? '.ci-venv/Scripts/python.exe' : '.ci-venv/bin/python')
+
+tasks.register('pythonSetup') {
+    inputs.file('requirements.txt')
+    outputs.file(venvPython)
+
+    doLast {
+        if (!venvPython.exists()) {
+            project.exec {
+                commandLine pythonCommand, '-m', 'venv', venvDir.absolutePath
+            }
+        }
+
+        project.exec {
+            commandLine venvPython.absolutePath, '-m', 'pip', 'install', '--upgrade', 'pip'
+        }
+
+        project.exec {
+            commandLine venvPython.absolutePath, '-m', 'pip', 'install', '-r', 'requirements.txt'
+        }
+    }
+}
+
+tasks.register('unitTest') {
+    dependsOn tasks.named('pythonSetup')
+
+    doLast {
+        file('build/test-results').mkdirs()
+
+        project.exec {
+            environment 'DATABASE_URL', "sqlite:///${file('build/ci-unit.db').absolutePath.replace('\\', '/')}"
+            environment 'SECRET_KEY', 'ci-secret-key-32-bytes-minimum-value-123456'
+            environment 'UPLOAD_DIR', file('build/uploads').absolutePath
+
+            commandLine venvPython.absolutePath, '-m', 'pytest',
+                    'tests',
+                    '-q',
+                    '--junitxml=build/test-results/pytest-unit.xml'
+        }
+    }
+}
+
+tasks.register('seleniumTest') {
+    dependsOn tasks.named('pythonSetup')
+
+    doLast {
+        project.exec {
+            environment 'DATABASE_URL', "sqlite:///${file('build/ci-selenium.db').absolutePath.replace('\\', '/')}"
+            environment 'SECRET_KEY', 'ci-secret-key-32-bytes-minimum-value-123456'
+            environment 'UPLOAD_DIR', file('build/uploads-selenium').absolutePath
+
+            commandLine venvPython.absolutePath, 'scripts/run_selenium_ci.py'
+        }
+    }
+}
+
+tasks.register('packageApp', Zip) {
+    dependsOn tasks.named('unitTest')
+
+    archiveBaseName.set('employee-leave-approval-system')
+    archiveVersion.set(project.version.toString())
+    destinationDirectory.set(layout.buildDirectory.dir('dist'))
+
+    duplicatesStrategy = DuplicatesStrategy.EXCLUDE
+
+    from(projectDir) {
+        exclude '.git/**',
+                '.gitignore',
+                '.venv/**',
+                '.ci-venv/**',
+                'build/**',
+                '__pycache__/**',
+                '**/__pycache__/**',
+                '*.pyc',
+                'test-results/**',
+                'jenkins_ci.db',
+                'leave_approval.db',
+                'test_leave.db',
+                'uploads/**'
+    }
+}
+
+tasks.named('build') {
+    dependsOn tasks.named('packageApp')
+}

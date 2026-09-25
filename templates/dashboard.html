@@ -1,0 +1,8 @@
+<!doctype html><html><head><title>Leave Approval Dashboard</title></head><body>
+<h1>Employee Leave Approval System</h1><p id="status">Admin Oversight Dashboard</p>
+<table border="1"><thead><tr><th>ID</th><th>Status</th><th>Employee</th></tr></thead><tbody id="rows"></tbody></table>
+<script>
+fetch('/api/leave/requests').then(r=>r.json()).then(items=>{
+ document.getElementById('rows').innerHTML=items.map(x=>`<tr><td>${x.id}</td><td>${x.status}</td><td>${x.employee_id}</td></tr>`).join('');
+});
+</script></body></html>
