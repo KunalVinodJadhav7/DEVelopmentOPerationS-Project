@@ -1,6 +1,20 @@
 pipeline {
     agent any
 
+    parameters {
+        choice(
+            name: 'DEPLOY_ENV',
+            choices: ['staging', 'production'],
+            description: 'Deployment environment'
+        )
+    }
+
+    environment {
+        PYTHON_EXE  = 'C:\\Users\\kphvj\\AppData\\Local\\Programs\\Python\\Python313\\python.exe'
+        DEPLOY_ROOT = 'C:\\ProgramData\\Jenkins\\deploy\\leaveflow'
+        APP_PORT    = '8000'
+    }
+
     triggers {
         pollSCM('H/5 * * * *')
     }
@@ -18,9 +32,11 @@ pipeline {
 
                 echo 'Checking out Employee Leave Approval System from GitHub...'
 
-                git branch: 'main',
+                git(
+                    branch: 'main',
                     credentialsId: 'github-credentials',
                     url: 'https://github.com/KunalVinodJadhav7/DEVelopmentOPerationS-Project.git'
+                )
 
                 bat 'git log -1 --oneline'
                 bat 'dir'
@@ -32,10 +48,8 @@ pipeline {
                 echo 'Creating Python CI environment...'
 
                 bat '''
-                    "C:\\Users\\kphvj\\AppData\\Local\\Programs\\Python\\Python313\\python.exe" -m venv .ci-venv
-
+                    "%PYTHON_EXE%" -m venv .ci-venv
                     .ci-venv\\Scripts\\python.exe -m pip install --upgrade pip
-
                     .ci-venv\\Scripts\\python.exe -m pip install -r requirements.txt
                 '''
             }
@@ -47,7 +61,6 @@ pipeline {
 
                 bat '''
                     if not exist build\\test-results mkdir build\\test-results
-                    if not exist build\\uploads mkdir build\\uploads
 
                     .ci-venv\\Scripts\\python.exe -m pytest tests -q --junitxml=build\\test-results\\pytest-jenkins.xml
                 '''
@@ -55,8 +68,10 @@ pipeline {
 
             post {
                 always {
-                    junit testResults: 'build/test-results/pytest-jenkins.xml',
-                          allowEmptyResults: true
+                    junit(
+                        testResults: 'build/test-results/pytest-jenkins.xml',
+                        allowEmptyResults: true
+                    )
                 }
             }
         }
@@ -99,20 +114,24 @@ pipeline {
             steps {
                 echo 'Archiving ZIP artifact in Jenkins...'
 
-                archiveArtifacts artifacts: 'build/dist/*.zip',
-                                 fingerprint: true
+                archiveArtifacts(
+                    artifacts: 'build/dist/*.zip',
+                    fingerprint: true
+                )
             }
         }
+
+        // Add deployment stages here if required.
     }
 
     post {
         success {
-            echo 'Week 7 Jenkins CI completed successfully.'
-            echo 'GitHub checkout, Python setup, unit tests, Gradle build, ZIP packaging, and artifact archiving succeeded.'
+            echo 'Jenkins CI completed successfully.'
+            echo 'Checkout, Python setup, unit tests, Gradle build, ZIP packaging, and artifact archiving succeeded.'
         }
 
         failure {
-            echo 'Week 7 Jenkins CI failed. Check the failed stage in the Jenkins console output.'
+            echo 'Jenkins CI failed. Check the failed stage in the Jenkins console output.'
         }
     }
 }
