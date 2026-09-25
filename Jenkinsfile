@@ -121,17 +121,167 @@ pipeline {
             }
         }
 
-        // Add deployment stages here if required.
+        stage('Deploy') {
+            steps {
+                powershell '''
+                    $ErrorActionPreference = "Stop"
+
+                    $envName = $env:DEPLOY_ENV
+                    $root = $env:DEPLOY_ROOT
+                    $port = $env:APP_PORT
+
+                    $environmentDir = Join-Path $root $envName
+                    $releaseDir = Join-Path $environmentDir $env:BUILD_NUMBER
+
+                    Write-Host "Deployment environment: $envName"
+                    Write-Host "Release directory: $releaseDir"
+
+                    New-Item `
+                        -ItemType Directory `
+                        -Force `
+                        -Path $releaseDir | Out-Null
+
+                    $zip = Get-ChildItem "build\\dist\\*.zip" |
+                           Sort-Object LastWriteTime -Descending |
+                           Select-Object -First 1
+
+                    if (-not $zip) {
+                        throw "Deployment ZIP was not found."
+                    }
+
+                    Write-Host "Deploying artifact: $($zip.FullName)"
+
+                    Expand-Archive `
+                        -LiteralPath $zip.FullName `
+                        -DestinationPath $releaseDir `
+                        -Force
+
+                    $python = $env:PYTHON_EXE
+                    $venv = Join-Path $releaseDir ".venv"
+
+                    Write-Host "Creating production Python virtual environment..."
+
+                    & $python -m venv $venv
+
+                    $venvPython = Join-Path $venv "Scripts\\python.exe"
+
+                    Write-Host "Installing Python dependencies..."
+
+                    & $venvPython -m pip install --upgrade pip
+
+                    $requirements = Join-Path $releaseDir "requirements.txt"
+
+                    if (-not (Test-Path $requirements)) {
+                        throw "requirements.txt not found in deployed artifact."
+                    }
+
+                    & $venvPython -m pip install -r $requirements
+
+                    $pidFile = Join-Path $environmentDir "current.pid"
+
+                    if (Test-Path $pidFile) {
+                        $oldPid = Get-Content $pidFile
+
+                        if ($oldPid) {
+                            try {
+                                Stop-Process `
+                                    -Id ([int]$oldPid) `
+                                    -Force `
+                                    -ErrorAction Stop
+
+                                Write-Host "Stopped previous FastAPI process: $oldPid"
+                            }
+                            catch {
+                                Write-Host "Previous process was not running."
+                            }
+                        }
+                    }
+
+                    $stdout = Join-Path $releaseDir "uvicorn.out.log"
+                    $stderr = Join-Path $releaseDir "uvicorn.err.log"
+
+                    Write-Host "Starting FastAPI application..."
+
+                    $process = Start-Process `
+                        -FilePath $venvPython `
+                        -ArgumentList @(
+                            "-m",
+                            "uvicorn",
+                            "main:app",
+                            "--host",
+                            "127.0.0.1",
+                            "--port",
+                            $port,
+                            "--proxy-headers"
+                        ) `
+                        -WorkingDirectory $releaseDir `
+                        -RedirectStandardOutput $stdout `
+                        -RedirectStandardError $stderr `
+                        -PassThru
+
+                    $process.Id | Set-Content $pidFile
+
+                    Write-Host "FastAPI PID: $($process.Id)"
+
+                    Start-Sleep -Seconds 5
+
+                    $healthUrl = "http://127.0.0.1:$port/openapi.json"
+                    $healthy = $false
+
+                    Write-Host "Checking FastAPI health..."
+
+                    for ($i = 1; $i -le 12; $i++) {
+                        try {
+                            $response = Invoke-WebRequest `
+                                -Uri $healthUrl `
+                                -UseBasicParsing `
+                                -TimeoutSec 5
+
+                            if ($response.StatusCode -eq 200) {
+                                $healthy = $true
+                                break
+                            }
+                        }
+                        catch {
+                            Write-Host "Waiting for FastAPI... attempt $i/12"
+                        }
+
+                        Start-Sleep -Seconds 2
+                    }
+
+                    if (-not $healthy) {
+                        Write-Host "FastAPI stdout:"
+
+                        if (Test-Path $stdout) {
+                            Get-Content $stdout
+                        }
+
+                        Write-Host "FastAPI stderr:"
+
+                        if (Test-Path $stderr) {
+                            Get-Content $stderr
+                        }
+
+                        throw "FastAPI health check failed."
+                    }
+
+                    Write-Host "FastAPI deployment successful."
+                    Write-Host "Environment: $envName"
+                    Write-Host "Release: $releaseDir"
+                    Write-Host "URL: http://127.0.0.1:$port"
+                '''
+            }
+        }
     }
 
     post {
         success {
-            echo 'Jenkins CI completed successfully.'
-            echo 'Checkout, Python setup, unit tests, Gradle build, ZIP packaging, and artifact archiving succeeded.'
+            echo 'Jenkins CI/CD pipeline completed successfully.'
+            echo 'Checkout, Python setup, tests, Gradle packaging, artifact archiving, deployment, and health check succeeded.'
         }
 
         failure {
-            echo 'Jenkins CI failed. Check the failed stage in the Jenkins console output.'
+            echo 'Jenkins CI/CD pipeline failed. Check the failed stage in the Jenkins console output.'
         }
     }
 }
