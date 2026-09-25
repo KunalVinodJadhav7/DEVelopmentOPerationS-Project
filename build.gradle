@@ -1,95 +1,105 @@
-plugins {
-    id 'base'
-}
+pipeline {
+    agent any
 
-group = 'com.leaveflow'
-version = project.findProperty('appVersion') ?: '1.0.0'
+    triggers {
+        pollSCM('H/5 * * * *')
+    }
 
-def isWindows = System.getProperty('os.name').toLowerCase().contains('windows')
-def pythonCommand = isWindows ? 'python' : 'python3'
-def venvDir = file('.ci-venv')
-def venvPython = file(isWindows ? '.ci-venv/Scripts/python.exe' : '.ci-venv/bin/python')
+    stages {
 
-tasks.register('pythonSetup') {
-    inputs.file('requirements.txt')
-    outputs.file(venvPython)
+        stage('Test GitHub Credential') {
+            steps {
+                deleteDir()
 
-    doLast {
-        if (!venvPython.exists()) {
-            project.exec {
-                commandLine pythonCommand, '-m', 'venv', venvDir.absolutePath
+                echo 'Testing GitHub credential...'
+
+                git branch: 'main',
+                    credentialsId: 'github-credentials',
+                    url: 'https://github.com/KunalVinodJadhav7/DEVelopmentOPerationS-Project.git'
+
+                bat 'git log -1 --oneline'
+                bat 'dir'
             }
         }
 
-        project.exec {
-            commandLine venvPython.absolutePath, '-m', 'pip', 'install', '--upgrade', 'pip'
+        stage('Python Setup') {
+            steps {
+                echo 'Creating Python CI environment...'
+
+                bat '''
+                    "C:\\Users\\kphvj\\AppData\\Local\\Programs\\Python\\Python313\\python.exe" -m venv .ci-venv
+
+                    .ci-venv\\Scripts\\python.exe -m pip install --upgrade pip
+
+                    .ci-venv\\Scripts\\python.exe -m pip install -r requirements.txt
+                '''
+            }
         }
 
-        project.exec {
-            commandLine venvPython.absolutePath, '-m', 'pip', 'install', '-r', 'requirements.txt'
+        stage('Unit Tests') {
+            steps {
+                echo 'Running Python unit tests...'
+
+                bat '''
+                    if not exist build\\test-results mkdir build\\test-results
+                    if not exist build\\uploads mkdir build\\uploads
+
+                    .ci-venv\\Scripts\\python.exe -m pytest tests -q --junitxml=build\\test-results\\pytest-jenkins.xml
+                '''
+            }
+
+            post {
+                always {
+                    junit testResults: 'build/test-results/pytest-jenkins.xml',
+                          allowEmptyResults: true
+                }
+            }
+        }
+
+        stage('Gradle Build') {
+            steps {
+                echo 'Running Gradle build and packaging...'
+
+                bat '''
+                    where gradle
+                    gradle --version
+                    gradle --no-daemon clean build "-PappVersion=1.0.%BUILD_NUMBER%"
+                '''
+            }
+        }
+
+        stage('Verify Artifact') {
+            steps {
+                echo 'Verifying generated ZIP artifact...'
+
+                bat '''
+                    dir build\\dist
+
+                    if not exist build\\dist\\*.zip (
+                        echo ERROR: ZIP artifact was not created.
+                        exit /b 1
+                    )
+                '''
+            }
+        }
+
+        stage('Archive ZIP Artifact') {
+            steps {
+                echo 'Archiving ZIP artifact...'
+
+                archiveArtifacts artifacts: 'build/dist/*.zip',
+                                 fingerprint: true
+            }
         }
     }
-}
 
-tasks.register('unitTest') {
-    dependsOn tasks.named('pythonSetup')
+    post {
+        success {
+            echo 'GitHub checkout, Python setup, unit tests, Gradle build, and artifact archiving completed successfully.'
+        }
 
-    doLast {
-        file('build/test-results').mkdirs()
-
-        project.exec {
-            environment 'DATABASE_URL', "sqlite:///${file('build/ci-unit.db').absolutePath.replace('\\', '/')}"
-            environment 'SECRET_KEY', 'ci-secret-key-32-bytes-minimum-value-123456'
-            environment 'UPLOAD_DIR', file('build/uploads').absolutePath
-
-            commandLine venvPython.absolutePath, '-m', 'pytest',
-                    'tests',
-                    '-q',
-                    '--junitxml=build/test-results/pytest-unit.xml'
+        failure {
+            echo 'Pipeline failed. Check the Jenkins console output.'
         }
     }
-}
-
-tasks.register('seleniumTest') {
-    dependsOn tasks.named('pythonSetup')
-
-    doLast {
-        project.exec {
-            environment 'DATABASE_URL', "sqlite:///${file('build/ci-selenium.db').absolutePath.replace('\\', '/')}"
-            environment 'SECRET_KEY', 'ci-secret-key-32-bytes-minimum-value-123456'
-            environment 'UPLOAD_DIR', file('build/uploads-selenium').absolutePath
-
-            commandLine venvPython.absolutePath, 'scripts/run_selenium_ci.py'
-        }
-    }
-}
-
-tasks.register('packageApp', Zip) {
-    dependsOn tasks.named('unitTest')
-
-    archiveBaseName.set('employee-leave-approval-system')
-    archiveVersion.set(project.version.toString())
-    destinationDirectory.set(layout.buildDirectory.dir('dist'))
-
-    duplicatesStrategy = DuplicatesStrategy.EXCLUDE
-
-    from(projectDir) {
-        exclude '.git/**',
-                '.gitignore',
-                '.venv/**',
-                '.ci-venv/**',
-                'build/**',
-                '__pycache__/**',
-                '**/__pycache__/**',
-                '*.pyc',
-                'test-results/**',
-                'jenkins_ci.db',
-                'leave_approval.db',
-                'test_leave.db',
-                'uploads/**'
-    }
-}
-
-tasks.named('build') {
-    dependsOn tasks.named('packageApp')
 }
