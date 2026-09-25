@@ -12,6 +12,7 @@ pipeline {
     environment {
         PYTHON_EXE  = 'C:\\Users\\kphvj\\AppData\\Local\\Programs\\Python\\Python313\\python.exe'
         DEPLOY_ROOT = 'C:\\ProgramData\\Jenkins\\deploy\\leaveflow'
+        NGINX_HOME  = 'C:\\nginx-1.31.6'
     }
 
     triggers {
@@ -156,7 +157,7 @@ pipeline {
                     }
 
                     Write-Host "=========================================="
-                    Write-Host "Starting deployment"
+                    Write-Host "Starting FastAPI deployment"
                     Write-Host "Environment : $envName"
                     Write-Host "Port        : $port"
                     Write-Host "=========================================="
@@ -176,13 +177,12 @@ pipeline {
 
                     Write-Host "Release directory: $releaseDir"
 
-                    # Locate the generated application ZIP.
                     $zip = Get-ChildItem "build\\dist\\*.zip" |
                         Sort-Object LastWriteTime -Descending |
                         Select-Object -First 1
 
                     if (-not $zip) {
-                        throw "No application ZIP was found."
+                        throw "Application ZIP was not found."
                     }
 
                     Write-Host "Deploying artifact: $($zip.FullName)"
@@ -192,7 +192,6 @@ pipeline {
                         -DestinationPath $releaseDir `
                         -Force
 
-                    # Verify the FastAPI application exists.
                     $appFile = Join-Path $releaseDir "app\\main.py"
 
                     if (-not (Test-Path $appFile)) {
@@ -201,36 +200,28 @@ pipeline {
 
                     Write-Host "FastAPI application found: $appFile"
 
-                    # Use the same Python installation already configured for Jenkins.
-                    $python = $env:PYTHON_EXE
-
-                    if (-not (Test-Path $python)) {
-                        throw "Python executable not found: $python"
-                    }
-
-                    Write-Host "Python: $python"
-
-                    # Verify required runtime packages using the Jenkins Python environment.
                     $ciPython = Join-Path $env:WORKSPACE ".ci-venv\\Scripts\\python.exe"
 
                     if (-not (Test-Path $ciPython)) {
                         throw "Jenkins Python environment not found: $ciPython"
                     }
 
-                    Write-Host "Using validated Jenkins Python environment: $ciPython"
+                    Write-Host "Runtime Python: $ciPython"
 
-                    # Stop previous deployment.
                     $pidFile = Join-Path $environmentDir "current.pid"
 
                     if (Test-Path $pidFile) {
+
                         $oldPidText = Get-Content $pidFile
 
                         if ($oldPidText -and $oldPidText.Trim() -ne "") {
 
-                            $oldPid = [int]$oldPidText
-
                             try {
-                                $oldProcess = Get-Process -Id $oldPid -ErrorAction Stop
+                                $oldPid = [int]$oldPidText
+
+                                $oldProcess = Get-Process `
+                                    -Id $oldPid `
+                                    -ErrorAction Stop
 
                                 Write-Host "Stopping previous FastAPI process: PID $oldPid"
 
@@ -239,7 +230,7 @@ pipeline {
                                     -Force `
                                     -ErrorAction Stop
 
-                                Write-Host "Previous process stopped."
+                                Write-Host "Previous FastAPI process stopped."
                             }
                             catch {
                                 Write-Host "Previous FastAPI process was not running."
@@ -250,11 +241,8 @@ pipeline {
                     $stdout = Join-Path $releaseDir "uvicorn.out.log"
                     $stderr = Join-Path $releaseDir "uvicorn.err.log"
 
-                    Write-Host "Starting FastAPI..."
+                    Write-Host "Starting FastAPI application..."
 
-                    # IMPORTANT:
-                    # app/main.py contains the FastAPI application.
-                    # Therefore the Uvicorn target is app.main:app.
                     $process = Start-Process `
                         -FilePath $ciPython `
                         -ArgumentList @(
@@ -278,11 +266,10 @@ pipeline {
 
                     Start-Sleep -Seconds 3
 
-                    # Health check.
                     $healthUrl = "http://127.0.0.1:$port/openapi.json"
                     $healthy = $false
 
-                    Write-Host "Running health check: $healthUrl"
+                    Write-Host "Checking FastAPI health: $healthUrl"
 
                     for ($i = 1; $i -le 15; $i++) {
 
@@ -294,6 +281,7 @@ pipeline {
 
                             if ($response.StatusCode -eq 200) {
                                 $healthy = $true
+                                Write-Host "FastAPI health check successful."
                                 break
                             }
                         }
@@ -326,12 +314,12 @@ pipeline {
                     }
 
                     Write-Host "=========================================="
-                    Write-Host "DEPLOYMENT SUCCESSFUL"
+                    Write-Host "FASTAPI DEPLOYMENT SUCCESSFUL"
                     Write-Host "Environment : $envName"
                     Write-Host "Release     : $releaseDir"
                     Write-Host "Port        : $port"
-                    Write-Host "URL         : http://127.0.0.1:$port"
                     Write-Host "PID         : $($process.Id)"
+                    Write-Host "URL         : http://127.0.0.1:$port"
                     Write-Host "=========================================="
                 '''
             }
@@ -340,17 +328,21 @@ pipeline {
         stage('Deployment Verification') {
             steps {
                 powershell '''
-                    $port = if ($env:DEPLOY_ENV -eq "production") {
-                        8000
+                    $ErrorActionPreference = "Stop"
+
+                    if ($env:DEPLOY_ENV -eq "production") {
+                        $port = 8000
                     }
                     else {
-                        8001
+                        $port = 8001
                     }
 
                     $url = "http://127.0.0.1:$port/openapi.json"
 
-                    Write-Host "Final deployment verification..."
+                    Write-Host "=========================================="
+                    Write-Host "Final FastAPI Verification"
                     Write-Host "Testing: $url"
+                    Write-Host "=========================================="
 
                     $response = Invoke-WebRequest `
                         -Uri $url `
@@ -358,7 +350,7 @@ pipeline {
                         -TimeoutSec 10
 
                     if ($response.StatusCode -ne 200) {
-                        throw "Deployment verification failed."
+                        throw "FastAPI verification failed."
                     }
 
                     Write-Host "Application is responding successfully."
@@ -366,16 +358,166 @@ pipeline {
                 '''
             }
         }
+
+        stage('Nginx Setup') {
+            when {
+                expression {
+                    return params.DEPLOY_ENV == 'production'
+                }
+            }
+
+            steps {
+                powershell '''
+                    $ErrorActionPreference = "Stop"
+
+                    $nginxHome = $env:NGINX_HOME
+                    $nginxExe = Join-Path $nginxHome "nginx.exe"
+                    $sourceConfig = Join-Path $env:WORKSPACE "nginx\\nginx.conf"
+                    $targetConfig = Join-Path $nginxHome "conf\\nginx.conf"
+
+                    Write-Host "=========================================="
+                    Write-Host "Nginx Configuration"
+                    Write-Host "Nginx Home: $nginxHome"
+                    Write-Host "=========================================="
+
+                    if (-not (Test-Path $nginxExe)) {
+                        throw "Nginx executable not found: $nginxExe"
+                    }
+
+                    if (-not (Test-Path $sourceConfig)) {
+                        throw "Repository Nginx configuration not found: $sourceConfig"
+                    }
+
+                    Copy-Item `
+                        -Path $sourceConfig `
+                        -Destination $targetConfig `
+                        -Force
+
+                    Write-Host "Nginx configuration copied to:"
+                    Write-Host $targetConfig
+
+                    Write-Host "Testing Nginx configuration..."
+
+                    & $nginxExe `
+                        -p "$nginxHome\\" `
+                        -c "conf\\nginx.conf" `
+                        -t
+
+                    if ($LASTEXITCODE -ne 0) {
+                        throw "Nginx configuration test failed."
+                    }
+
+                    Write-Host "Nginx configuration test successful."
+
+                    $nginxProcesses = Get-Process nginx -ErrorAction SilentlyContinue
+
+                    if ($nginxProcesses) {
+
+                        Write-Host "Nginx is already running. Reloading configuration..."
+
+                        & $nginxExe `
+                            -p "$nginxHome\\" `
+                            -c "conf\\nginx.conf" `
+                            -s reload
+
+                        if ($LASTEXITCODE -ne 0) {
+                            throw "Nginx reload failed."
+                        }
+
+                        Write-Host "Nginx reload successful."
+                    }
+                    else {
+
+                        Write-Host "Nginx is not running. Starting Nginx..."
+
+                        Start-Process `
+                            -FilePath $nginxExe `
+                            -WorkingDirectory $nginxHome
+
+                        Start-Sleep -Seconds 3
+
+                        $nginxProcesses = Get-Process nginx -ErrorAction SilentlyContinue
+
+                        if (-not $nginxProcesses) {
+                            throw "Nginx failed to start."
+                        }
+
+                        Write-Host "Nginx started successfully."
+                    }
+                '''
+            }
+        }
+
+        stage('Nginx Verification') {
+            when {
+                expression {
+                    return params.DEPLOY_ENV == 'production'
+                }
+            }
+
+            steps {
+                powershell '''
+                    $ErrorActionPreference = "Stop"
+
+                    $url = "http://localhost/openapi.json"
+
+                    Write-Host "=========================================="
+                    Write-Host "Nginx End-to-End Verification"
+                    Write-Host "Testing: $url"
+                    Write-Host "=========================================="
+
+                    $healthy = $false
+
+                    for ($i = 1; $i -le 10; $i++) {
+
+                        try {
+                            $response = Invoke-WebRequest `
+                                -Uri $url `
+                                -UseBasicParsing `
+                                -TimeoutSec 5
+
+                            if ($response.StatusCode -eq 200) {
+                                $healthy = $true
+                                Write-Host "Nginx reverse proxy verification successful."
+                                Write-Host "HTTP Status: $($response.StatusCode)"
+                                break
+                            }
+                        }
+                        catch {
+                            Write-Host "Waiting for Nginx... attempt $i/10"
+                        }
+
+                        Start-Sleep -Seconds 2
+                    }
+
+                    if (-not $healthy) {
+                        throw "Nginx end-to-end verification failed."
+                    }
+
+                    Write-Host "=========================================="
+                    Write-Host "NGINX + FASTAPI VERIFICATION SUCCESSFUL"
+                    Write-Host "URL: http://localhost/openapi.json"
+                    Write-Host "=========================================="
+                '''
+            }
+        }
     }
 
     post {
         success {
-            echo 'Jenkins CI/CD pipeline completed successfully.'
-            echo 'Build, test, package, deployment, and application verification succeeded.'
+            echo 'Jenkins Week 8 CI/CD pipeline completed successfully.'
+            echo 'Build, tests, Gradle packaging, artifact archiving, FastAPI deployment, verification, and Nginx verification succeeded where applicable.'
         }
 
         failure {
-            echo 'Jenkins CI/CD pipeline failed. Check the failed stage in the Jenkins console.'
+            echo 'Jenkins Week 8 pipeline failed. Check the failed stage and console output.'
+        }
+
+        always {
+            archiveArtifacts(
+                artifacts: 'build/dist/*.zip,*.log',
+                allowEmptyArchive: true
+            )
         }
     }
 }
