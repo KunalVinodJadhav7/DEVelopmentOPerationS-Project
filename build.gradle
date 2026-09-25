@@ -16,26 +16,32 @@ tasks.register('packageApp', Zip) {
     duplicatesStrategy = DuplicatesStrategy.EXCLUDE
 
     from(projectDir) {
+        // Git
         exclude '.git/**'
         exclude '.gitignore'
 
+        // Gradle
+        exclude '.gradle/**'
+
+        // Python virtual environments
         exclude '.venv/**'
         exclude '.ci-venv/**'
 
+        // Build/test generated files
         exclude 'build/**'
         exclude '__pycache__/**'
         exclude '**/__pycache__/**'
-
         exclude '*.pyc'
         exclude '**/*.pyc'
         exclude '*.pyo'
         exclude '**/*.pyo'
+        exclude 'test-results/**'
 
+        // Secrets/configuration
         exclude '.env'
         exclude '.env.*'
 
-        exclude 'test-results/**'
-
+        // Databases
         exclude '*.db'
         exclude '**/*.db'
         exclude '*.sqlite'
@@ -43,6 +49,7 @@ tasks.register('packageApp', Zip) {
         exclude '*.sqlite3'
         exclude '**/*.sqlite3'
 
+        // Runtime uploads
         exclude 'uploads/**'
         exclude '**/uploads/**'
     }
