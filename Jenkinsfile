@@ -217,21 +217,21 @@ pipeline {
                     Write-Host "Starting FastAPI application..."
 
                     $process = Start-Process `
-                        -FilePath $venvPython `
-                        -ArgumentList @(
-                            "-m",
-                            "uvicorn",
-                            "main:app",
-                            "--host",
-                            "127.0.0.1",
-                            "--port",
-                            $port,
-                            "--proxy-headers"
-                        ) `
-                        -WorkingDirectory $releaseDir `
-                        -RedirectStandardOutput $stdout `
-                        -RedirectStandardError $stderr `
-                        -PassThru
+                            -FilePath $venvPython `
+                            -ArgumentList @(
+                                "-m",
+                                "uvicorn",
+                                "app.main:app",
+                                "--host",
+                                "127.0.0.1",
+                                "--port",
+                                $port,
+                                "--proxy-headers"
+                            ) `
+                            -WorkingDirectory $releaseDir `
+                            -RedirectStandardOutput $stdout `
+                            -RedirectStandardError $stderr `
+                            -PassThru
 
                     $process.Id | Set-Content $pidFile
 
