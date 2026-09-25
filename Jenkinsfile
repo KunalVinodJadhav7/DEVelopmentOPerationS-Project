@@ -12,7 +12,7 @@ pipeline {
     environment {
         PYTHON_EXE  = 'C:\\Users\\kphvj\\AppData\\Local\\Programs\\Python\\Python313\\python.exe'
         DEPLOY_ROOT = 'C:\\ProgramData\\Jenkins\\deploy\\leaveflow'
-        NGINX_HOME  = 'C:\\nginx-1.31.6'
+        NGINX_HOME  = 'C:\\nginx-1.30.5'
     }
 
     triggers {
