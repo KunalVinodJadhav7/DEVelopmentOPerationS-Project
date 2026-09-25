@@ -12,7 +12,6 @@ pipeline {
     environment {
         PYTHON_EXE  = 'C:\\Users\\kphvj\\AppData\\Local\\Programs\\Python\\Python313\\python.exe'
         DEPLOY_ROOT = 'C:\\ProgramData\\Jenkins\\deploy\\leaveflow'
-        APP_PORT    = '8000'
     }
 
     triggers {
@@ -128,22 +127,39 @@ pipeline {
 
                     $envName = $env:DEPLOY_ENV
                     $root = $env:DEPLOY_ROOT
-                    $port = $env:APP_PORT
+
+                    switch ($envName) {
+                        "production" {
+                            $port = 8000
+                        }
+
+                        "staging" {
+                            $port = 8001
+                        }
+
+                        default {
+                            throw "Unsupported deployment environment: $envName"
+                        }
+                    }
+
+                    Write-Host "=========================================="
+                    Write-Host "Deployment environment: $envName"
+                    Write-Host "Application port: $port"
+                    Write-Host "=========================================="
 
                     $environmentDir = Join-Path $root $envName
                     $releaseDir = Join-Path $environmentDir $env:BUILD_NUMBER
-
-                    Write-Host "Deployment environment: $envName"
-                    Write-Host "Release directory: $releaseDir"
 
                     New-Item `
                         -ItemType Directory `
                         -Force `
                         -Path $releaseDir | Out-Null
 
+                    Write-Host "Release directory: $releaseDir"
+
                     $zip = Get-ChildItem "build\\dist\\*.zip" |
-                           Sort-Object LastWriteTime -Descending |
-                           Select-Object -First 1
+                        Sort-Object LastWriteTime -Descending |
+                        Select-Object -First 1
 
                     if (-not $zip) {
                         throw "Deployment ZIP was not found."
@@ -159,22 +175,20 @@ pipeline {
                     $python = $env:PYTHON_EXE
                     $venv = Join-Path $releaseDir ".venv"
 
-                    Write-Host "Creating production Python virtual environment..."
+                    Write-Host "Creating deployment virtual environment..."
 
                     & $python -m venv $venv
 
                     $venvPython = Join-Path $venv "Scripts\\python.exe"
-
-                    Write-Host "Installing Python dependencies..."
-
-                    & $venvPython -m pip install --upgrade pip
-
                     $requirements = Join-Path $releaseDir "requirements.txt"
 
                     if (-not (Test-Path $requirements)) {
                         throw "requirements.txt not found in deployed artifact."
                     }
 
+                    Write-Host "Installing deployment dependencies..."
+
+                    & $venvPython -m pip install --upgrade pip
                     & $venvPython -m pip install -r $requirements
 
                     $pidFile = Join-Path $environmentDir "current.pid"
@@ -189,10 +203,10 @@ pipeline {
                                     -Force `
                                     -ErrorAction Stop
 
-                                Write-Host "Stopped previous FastAPI process: $oldPid"
+                                Write-Host "Stopped previous $envName process: $oldPid"
                             }
                             catch {
-                                Write-Host "Previous process was not running."
+                                Write-Host "Previous $envName process was not running."
                             }
                         }
                     }
@@ -223,12 +237,12 @@ pipeline {
 
                     Write-Host "FastAPI PID: $($process.Id)"
 
-                    Start-Sleep -Seconds 5
+                    Start-Sleep -Seconds 3
 
                     $healthUrl = "http://127.0.0.1:$port/openapi.json"
                     $healthy = $false
 
-                    Write-Host "Checking FastAPI health..."
+                    Write-Host "Checking FastAPI health: $healthUrl"
 
                     for ($i = 1; $i -le 12; $i++) {
                         try {
@@ -239,6 +253,7 @@ pipeline {
 
                             if ($response.StatusCode -eq 200) {
                                 $healthy = $true
+                                Write-Host "Health check successful."
                                 break
                             }
                         }
@@ -250,13 +265,17 @@ pipeline {
                     }
 
                     if (-not $healthy) {
-                        Write-Host "FastAPI stdout:"
+                        Write-Host "=========================================="
+                        Write-Host "FastAPI stdout"
+                        Write-Host "=========================================="
 
                         if (Test-Path $stdout) {
                             Get-Content $stdout
                         }
 
-                        Write-Host "FastAPI stderr:"
+                        Write-Host "=========================================="
+                        Write-Host "FastAPI stderr"
+                        Write-Host "=========================================="
 
                         if (Test-Path $stderr) {
                             Get-Content $stderr
@@ -265,10 +284,13 @@ pipeline {
                         throw "FastAPI health check failed."
                     }
 
+                    Write-Host "=========================================="
                     Write-Host "FastAPI deployment successful."
-                    Write-Host "Environment: $envName"
-                    Write-Host "Release: $releaseDir"
-                    Write-Host "URL: http://127.0.0.1:$port"
+                    Write-Host "Environment : $envName"
+                    Write-Host "Release     : $releaseDir"
+                    Write-Host "Port        : $port"
+                    Write-Host "URL         : http://127.0.0.1:$port"
+                    Write-Host "=========================================="
                 '''
             }
         }
