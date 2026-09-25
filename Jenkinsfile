@@ -1,155 +1,118 @@
 pipeline {
     agent any
 
-    tools {
-        gradle 'Gradle-8'
+    triggers {
+        pollSCM('H/5 * * * *')
     }
 
     options {
         timestamps()
         disableConcurrentBuilds()
-        skipDefaultCheckout(true)
-    }
-
-    parameters {
-        string(name: 'APP_VERSION', defaultValue: '', description: 'Optional release version. Blank = Jenkins BUILD_NUMBER.')
-        booleanParam(name: 'PUSH_IMAGE', defaultValue: false, description: 'Push the Docker image to Docker Hub using the dockerhub-creds credential.')
-    }
-
-    environment {
-        DOCKER_IMAGE = 'leave-approval-system'
-        IMAGE_TAG = "${BUILD_NUMBER}"
-    }
-
-    triggers {
-        pollSCM('H/5 * * * *')
     }
 
     stages {
-        stage('Checkout') {
+
+        stage('GitHub Checkout') {
             steps {
-                checkout scm
+                deleteDir()
+
+                echo 'Checking out Employee Leave Approval System from GitHub...'
+
+                git branch: 'main',
+                    credentialsId: 'github-credentials',
+                    url: 'https://github.com/KunalVinodJadhav7/DEVelopmentOPerationS-Project.git'
+
+                bat 'git log -1 --oneline'
+                bat 'dir'
             }
         }
 
-        stage('Gradle Build & Unit Tests') {
+        stage('Python Setup') {
             steps {
-                script {
-                    def releaseVersion = params.APP_VERSION?.trim() ? params.APP_VERSION.trim() : env.BUILD_NUMBER
-                    if (isUnix()) {
-                        sh "gradle --no-daemon clean build -PappVersion=${releaseVersion}"
-                    } else {
-                        bat "gradle --no-daemon clean build -PappVersion=${releaseVersion}"
-                    }
+                echo 'Creating Python CI environment...'
+
+                bat '''
+                    "C:\\Users\\kphvj\\AppData\\Local\\Programs\\Python\\Python313\\python.exe" -m venv .ci-venv
+
+                    .ci-venv\\Scripts\\python.exe -m pip install --upgrade pip
+
+                    .ci-venv\\Scripts\\python.exe -m pip install -r requirements.txt
+                '''
+            }
+        }
+
+        stage('Unit Tests') {
+            steps {
+                echo 'Running Python unit tests...'
+
+                bat '''
+                    if not exist build\\test-results mkdir build\\test-results
+                    if not exist build\\uploads mkdir build\\uploads
+
+                    .ci-venv\\Scripts\\python.exe -m pytest tests -q --junitxml=build\\test-results\\pytest-jenkins.xml
+                '''
+            }
+
+            post {
+                always {
+                    junit testResults: 'build/test-results/pytest-jenkins.xml',
+                          allowEmptyResults: true
                 }
             }
         }
 
-        stage('Archive Build Artifact') {
+        stage('Gradle Build') {
             steps {
-                archiveArtifacts artifacts: 'build/dist/*.zip', fingerprint: true
+                echo 'Running Gradle build and packaging...'
+
+                bat '''
+                    where gradle
+                    gradle --version
+                    gradle --no-daemon clean build "-PappVersion=1.0.%BUILD_NUMBER%"
+                '''
             }
         }
 
-        stage('Selenium Quality Gate') {
+        stage('Verify Artifact') {
             steps {
-                script {
-                    if (isUnix()) {
-                        sh 'gradle --no-daemon seleniumTest'
-                    } else {
-                        bat 'gradle --no-daemon seleniumTest'
-                    }
-                }
+                echo 'Verifying generated ZIP artifact...'
+
+                bat '''
+                    if not exist build\\dist (
+                        echo ERROR: build\\dist directory was not created.
+                        exit /b 1
+                    )
+
+                    dir build\\dist
+
+                    if not exist build\\dist\\*.zip (
+                        echo ERROR: ZIP artifact was not created.
+                        exit /b 1
+                    )
+
+                    echo ZIP artifact successfully created.
+                '''
             }
         }
 
-        stage('Build Docker Image') {
+        stage('Archive ZIP Artifact') {
             steps {
-                script {
-                    if (isUnix()) {
-                        sh '''
-                            set -e
-                            docker build -t "$DOCKER_IMAGE:$IMAGE_TAG" -t "$DOCKER_IMAGE:latest" .
-                        '''
-                    } else {
-                        bat '''
-                            docker build -t "%DOCKER_IMAGE%:%IMAGE_TAG%" -t "%DOCKER_IMAGE%:latest" .
-                        '''
-                    }
-                }
-            }
-        }
+                echo 'Archiving ZIP artifact in Jenkins...'
 
-        stage('Publish Docker Image') {
-            when {
-                expression { params.PUSH_IMAGE }
-            }
-            steps {
-                withCredentials([usernamePassword(
-                    credentialsId: 'dockerhub-creds',
-                    usernameVariable: 'DOCKERHUB_USER',
-                    passwordVariable: 'DOCKERHUB_TOKEN'
-                )]) {
-                    script {
-                        if (isUnix()) {
-                            sh '''
-                                set -e
-                                echo "$DOCKERHUB_TOKEN" | docker login -u "$DOCKERHUB_USER" --password-stdin
-                                docker tag "$DOCKER_IMAGE:$IMAGE_TAG" "$DOCKERHUB_USER/$DOCKER_IMAGE:$IMAGE_TAG"
-                                docker tag "$DOCKER_IMAGE:latest" "$DOCKERHUB_USER/$DOCKER_IMAGE:latest"
-                                docker push "$DOCKERHUB_USER/$DOCKER_IMAGE:$IMAGE_TAG"
-                                docker push "$DOCKERHUB_USER/$DOCKER_IMAGE:latest"
-                                docker logout
-                            '''
-                        } else {
-                            bat '''
-                                echo %DOCKERHUB_TOKEN%| docker login -u "%DOCKERHUB_USER%" --password-stdin
-                                docker tag "%DOCKER_IMAGE%:%IMAGE_TAG%" "%DOCKERHUB_USER%/%DOCKER_IMAGE%:%IMAGE_TAG%"
-                                docker tag "%DOCKER_IMAGE%:latest" "%DOCKERHUB_USER%/%DOCKER_IMAGE%:latest"
-                                docker push "%DOCKERHUB_USER%/%DOCKER_IMAGE%:%IMAGE_TAG%"
-                                docker push "%DOCKERHUB_USER%/%DOCKER_IMAGE%:latest"
-                                docker logout
-                            '''
-                        }
-                    }
-                }
-            }
-        }
-
-        stage('Deploy Nginx Stack') {
-            steps {
-                script {
-                    if (isUnix()) {
-                        sh '''
-                            set -e
-                            export IMAGE_TAG="$IMAGE_TAG"
-                            export DOCKER_IMAGE="$DOCKER_IMAGE"
-                            docker compose up -d --build
-                            docker compose ps
-                            curl --fail --retry 10 --retry-delay 2 http://127.0.0.1:8000/health
-                        '''
-                    } else {
-                        bat '''
-                            set IMAGE_TAG=%IMAGE_TAG%
-                            set DOCKER_IMAGE=%DOCKER_IMAGE%
-                            docker compose up -d --build
-                            docker compose ps
-                            powershell -NoProfile -Command "$r = Invoke-WebRequest -UseBasicParsing http://127.0.0.1:8000/health; if ($r.StatusCode -ne 200) { exit 1 }"
-                        '''
-                    }
-                }
+                archiveArtifacts artifacts: 'build/dist/*.zip',
+                                 fingerprint: true
             }
         }
     }
 
     post {
-        always {
-            junit allowEmptyResults: false, testResults: 'build/test-results/*.xml'
-            archiveArtifacts allowEmptyArchive: true, artifacts: 'test-results/screenshots/**/*'
-        }
         success {
-            echo 'Employee Leave Approval CI/CD pipeline completed successfully.'
-            echo 'Application URL: http://localhost:8000/dashboard'
+            echo 'Week 7 Jenkins CI completed successfully.'
+            echo 'GitHub checkout, Python setup, unit tests, Gradle build, ZIP packaging, and artifact archiving succeeded.'
+        }
+
+        failure {
+            echo 'Week 7 Jenkins CI failed. Check the failed stage in the Jenkins console output.'
         }
     }
 }
