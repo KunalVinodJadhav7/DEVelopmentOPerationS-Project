@@ -25,6 +25,20 @@ pipeline {
 
     stages {
 
+        stage('Validate Deployment Parameter') {
+            steps {
+                script {
+                    if (!params.DEPLOY_ENV?.trim()) {
+                        error(
+                            'DEPLOY_ENV was not provided. Use "Build with Parameters" and select staging or production.'
+                        )
+                    }
+
+                    echo "Selected deployment environment: ${params.DEPLOY_ENV}"
+                }
+            }
+        }
+
         stage('GitHub Checkout') {
             steps {
                 deleteDir()
@@ -217,21 +231,21 @@ pipeline {
                     Write-Host "Starting FastAPI application..."
 
                     $process = Start-Process `
-                            -FilePath $venvPython `
-                            -ArgumentList @(
-                                "-m",
-                                "uvicorn",
-                                "app.main:app",
-                                "--host",
-                                "127.0.0.1",
-                                "--port",
-                                $port,
-                                "--proxy-headers"
-                            ) `
-                            -WorkingDirectory $releaseDir `
-                            -RedirectStandardOutput $stdout `
-                            -RedirectStandardError $stderr `
-                            -PassThru
+                        -FilePath $venvPython `
+                        -ArgumentList @(
+                            "-m",
+                            "uvicorn",
+                            "app.main:app",
+                            "--host",
+                            "127.0.0.1",
+                            "--port",
+                            $port,
+                            "--proxy-headers"
+                        ) `
+                        -WorkingDirectory $releaseDir `
+                        -RedirectStandardOutput $stdout `
+                        -RedirectStandardError $stderr `
+                        -PassThru
 
                     $process.Id | Set-Content $pidFile
 
