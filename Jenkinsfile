@@ -14,6 +14,7 @@ pipeline {
         DEPLOY_ROOT        = 'C:\\ProgramData\\Jenkins\\deploy\\leaveflow'
         NGINX_HOME         = 'C:\\nginx-1.30.5'
         SELENIUM_BASE_URL  = 'http://localhost/dashboard'
+        SECRET_KEY         = credentials('leaveflow-secret-key')
     }
 
     triggers {
