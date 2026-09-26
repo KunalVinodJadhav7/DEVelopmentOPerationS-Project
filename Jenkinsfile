@@ -819,7 +819,7 @@ if (`$LASTEXITCODE -ne 0) {
                         env.BASE_URL =
                             'http://localhost'
 
-                        echo `
+                        echo
                             'Selenium target: production through Nginx.'
                     }
                     else {
