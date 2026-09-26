@@ -10,9 +10,10 @@ pipeline {
     }
 
     environment {
-        PYTHON_EXE  = 'C:\\Users\\kphvj\\AppData\\Local\\Programs\\Python\\Python313\\python.exe'
-        DEPLOY_ROOT = 'C:\\ProgramData\\Jenkins\\deploy\\leaveflow'
-        NGINX_HOME  = 'C:\\nginx-1.30.5'
+        PYTHON_EXE         = 'C:\\Users\\kphvj\\AppData\\Local\\Programs\\Python\\Python313\\python.exe'
+        DEPLOY_ROOT        = 'C:\\ProgramData\\Jenkins\\deploy\\leaveflow'
+        NGINX_HOME         = 'C:\\nginx-1.30.5'
+        SELENIUM_BASE_URL  = 'http://localhost/dashboard'
     }
 
     triggers {
@@ -88,6 +89,45 @@ pipeline {
                     junit(
                         testResults: 'build/test-results/pytest-jenkins.xml',
                         allowEmptyResults: true
+                    )
+                }
+            }
+        }
+
+        stage('Verify Selenium Target') {
+            steps {
+                echo "Checking ${SELENIUM_BASE_URL} before Selenium..."
+
+                bat '''
+                    curl.exe -f --max-time 20 "%SELENIUM_BASE_URL%"
+                '''
+            }
+        }
+
+        stage('Selenium Integration Tests') {
+            steps {
+                echo 'Running Week 10 Selenium integration tests...'
+
+                bat '''
+                    if not exist test-results mkdir test-results
+                    if not exist selenium_tests\\artifacts mkdir selenium_tests\\artifacts
+
+                    .ci-venv\\Scripts\\python.exe -m pytest selenium_tests ^
+                        -v ^
+                        --junitxml=test-results\\selenium-results.xml
+                '''
+            }
+
+            post {
+                always {
+                    junit(
+                        allowEmptyResults: true,
+                        testResults: 'test-results/selenium-results.xml'
+                    )
+
+                    archiveArtifacts(
+                        allowEmptyArchive: true,
+                        artifacts: 'selenium_tests/artifacts/**/*'
                     )
                 }
             }
@@ -505,12 +545,12 @@ pipeline {
 
     post {
         success {
-            echo 'Jenkins Week 8 CI/CD pipeline completed successfully.'
+            echo 'Jenkins Week 10 CI/CD pipeline completed successfully.'
             echo 'Build, tests, Gradle packaging, artifact archiving, FastAPI deployment, verification, and Nginx verification succeeded where applicable.'
         }
 
         failure {
-            echo 'Jenkins Week 8 pipeline failed. Check the failed stage and console output.'
+            echo 'Jenkins Week 10 pipeline failed. Check the failed stage and console output.'
         }
 
         always {

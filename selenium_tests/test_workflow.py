@@ -668,5 +668,683 @@ class LeaveApprovalWorkflowTest(unittest.TestCase):
         self._hr_decide(reason_text, approved=False)
 
 
+    # ============================================================
+    # WEEK 10 EXTENSIONS
+    # Employee -> HR -> Manager -> Admin -> Super Admin -> Employee
+    # ============================================================
+
+    def _manager_decide(self, reason_text, approved):
+        """Log in as Manager, review the request, and record a decision."""
+
+        manager_username = f"manager_{uuid.uuid4().hex[:8]}"
+        manager_email = f"{manager_username}@example.com"
+        manager_password = "Passw0rd!"
+
+        self._register_user_and_login(
+            manager_username,
+            manager_email,
+            manager_password,
+            "manager",
+            "/manager",
+        )
+
+        self.assertIn(
+            "/manager",
+            self.driver.current_url,
+        )
+
+        # Manager queue is the second navigation button.
+        self.wait_click("#nav button:nth-child(2)")
+
+        request_card = self.wait.until(
+            EC.presence_of_element_located(
+                (
+                    By.XPATH,
+                    "//article[contains(@class,'request')]"
+                    f"[contains(.//div[contains(@class,'request-meta')], '{reason_text}')]",
+                )
+            )
+        )
+
+        review_button = request_card.find_element(
+            By.XPATH,
+            ".//button[normalize-space()='Review']",
+        )
+
+        self.wait.until(
+            lambda driver: review_button.is_enabled()
+        )
+        review_button.click()
+
+        comments = self.wait.until(
+            EC.visibility_of_element_located(
+                (By.ID, "reviewComments")
+            )
+        )
+
+        comments.send_keys(
+            "Selenium Manager approval test decision."
+            if approved
+            else "Selenium Manager rejection test decision."
+        )
+
+        if approved:
+            decision_text = "Decision recorded"
+            button_locator = (
+                By.XPATH,
+                "//button[normalize-space()='Approve']",
+            )
+        else:
+            decision_text = "Request rejected"
+            button_locator = (
+                By.XPATH,
+                "//button[normalize-space()='Reject']",
+            )
+
+        self.wait.until(
+            EC.element_to_be_clickable(button_locator)
+        ).click()
+
+        # The modal closes after the API call.
+        self.wait.until(
+            EC.invisibility_of_element_located(
+                (By.ID, "reviewComments")
+            )
+        )
+
+        self.wait.until(
+            lambda driver: (
+                decision_text
+                in driver.find_element(
+                    By.TAG_NAME,
+                    "body",
+                ).text
+            )
+        )
+
+        # Audit Trail is the third navigation button and shows request
+        # status/history for this role.
+        self.wait_click("#nav button:nth-child(3)")
+
+        expected_status = (
+            "PENDING ADMIN"
+            if approved
+            else "REJECTED"
+        )
+
+        self.wait.until(
+            lambda driver: (
+                reason_text
+                in driver.find_element(
+                    By.TAG_NAME,
+                    "body",
+                ).text
+                and expected_status
+                in driver.find_element(
+                    By.TAG_NAME,
+                    "body",
+                ).text
+            )
+        )
+
+        body_text = self.driver.find_element(
+            By.TAG_NAME,
+            "body",
+        ).text
+
+        self.assertIn(
+            reason_text,
+            body_text,
+        )
+
+        self.assertIn(
+            expected_status,
+            body_text,
+        )
+
+    def _admin_decide(self, reason_text, approved):
+        """Log in as Admin, finalize the request, and record a decision."""
+
+        admin_username = f"admin_{uuid.uuid4().hex[:8]}"
+        admin_email = f"{admin_username}@example.com"
+        admin_password = "Passw0rd!"
+
+        self._register_user_and_login(
+            admin_username,
+            admin_email,
+            admin_password,
+            "admin",
+            "/admin",
+        )
+
+        self.assertIn(
+            "/admin",
+            self.driver.current_url,
+        )
+
+        # Admin queue is the second navigation button.
+        self.wait_click("#nav button:nth-child(2)")
+
+        request_card = self.wait.until(
+            EC.presence_of_element_located(
+                (
+                    By.XPATH,
+                    "//article[contains(@class,'request')]"
+                    f"[contains(.//div[contains(@class,'request-meta')], '{reason_text}')]",
+                )
+            )
+        )
+
+        self.assertIn(
+            "PENDING ADMIN",
+            request_card.text.upper(),
+        )
+
+        finalize_button = request_card.find_element(
+            By.XPATH,
+            ".//button[normalize-space()='Finalize']",
+        )
+
+        self.wait.until(
+            lambda driver: finalize_button.is_enabled()
+        )
+        finalize_button.click()
+
+        comments = self.wait.until(
+            EC.visibility_of_element_located(
+                (By.ID, "reviewComments")
+            )
+        )
+
+        comments.send_keys(
+            "Selenium Admin finalization approval."
+            if approved
+            else "Selenium Admin finalization rejection."
+        )
+
+        if approved:
+            decision_text = "Decision recorded"
+            button_locator = (
+                By.XPATH,
+                "//button[normalize-space()='Approve']",
+            )
+        else:
+            decision_text = "Request rejected"
+            button_locator = (
+                By.XPATH,
+                "//button[normalize-space()='Reject']",
+            )
+
+        self.wait.until(
+            EC.element_to_be_clickable(button_locator)
+        ).click()
+
+        self.wait.until(
+            EC.invisibility_of_element_located(
+                (By.ID, "reviewComments")
+            )
+        )
+
+        self.wait.until(
+            lambda driver: (
+                decision_text
+                in driver.find_element(
+                    By.TAG_NAME,
+                    "body",
+                ).text
+            )
+        )
+
+        expected_status = (
+            "APPROVED"
+            if approved
+            else "REJECTED"
+        )
+
+        # Verify through Audit Trail.
+        self.wait_click("#nav button:nth-child(3)")
+
+        self.wait.until(
+            lambda driver: (
+                reason_text
+                in driver.find_element(
+                    By.TAG_NAME,
+                    "body",
+                ).text
+                and expected_status
+                in driver.find_element(
+                    By.TAG_NAME,
+                    "body",
+                ).text
+            )
+        )
+
+        body_text = self.driver.find_element(
+            By.TAG_NAME,
+            "body",
+        ).text
+
+        self.assertIn(
+            reason_text,
+            body_text,
+        )
+
+        self.assertIn(
+            expected_status,
+            body_text,
+        )
+
+    def _super_admin_notify(self, reason_text, expected_status):
+        """Log in as Super Admin and notify the employee."""
+
+        super_admin_username = (
+            f"superadmin_{uuid.uuid4().hex[:8]}"
+        )
+        super_admin_email = (
+            f"{super_admin_username}@example.com"
+        )
+        super_admin_password = "Passw0rd!"
+
+        self._register_user_and_login(
+            super_admin_username,
+            super_admin_email,
+            super_admin_password,
+            "super_admin",
+            "/super-admin",
+        )
+
+        self.assertIn(
+            "/super-admin",
+            self.driver.current_url,
+        )
+
+        # Super Admin Operations is the second navigation button.
+        self.wait_click("#nav button:nth-child(2)")
+
+        request_card = self.wait.until(
+            EC.presence_of_element_located(
+                (
+                    By.XPATH,
+                    "//article[contains(@class,'request')]"
+                    f"[contains(.//div[contains(@class,'request-meta')], '{reason_text}')]",
+                )
+            )
+        )
+
+        self.assertIn(
+            expected_status,
+            request_card.text.upper(),
+        )
+
+        notify_button = request_card.find_element(
+            By.XPATH,
+            ".//button[normalize-space()='Notify']",
+        )
+
+        self.wait.until(
+            lambda driver: notify_button.is_enabled()
+        )
+        notify_button.click()
+
+        # Current frontend shows this toast after notification succeeds.
+        self.wait.until(
+            lambda driver: (
+                "Employee notified for leave #"
+                in driver.find_element(
+                    By.ID,
+                    "toast",
+                ).text
+            )
+        )
+
+        toast_text = self.driver.find_element(
+            By.ID,
+            "toast",
+        ).text
+
+        self.assertIn(
+            "Employee notified for leave #",
+            toast_text,
+        )
+
+        # Open Audit Trail and inspect the request audit.
+        self.wait_click("#nav button:nth-child(3)")
+
+        self.wait.until(
+            lambda driver: (
+                reason_text
+                in driver.find_element(
+                    By.TAG_NAME,
+                    "body",
+                ).text
+            )
+        )
+
+        audit_request_card = self.wait.until(
+            EC.presence_of_element_located(
+                (
+                    By.XPATH,
+                    "//article[contains(@class,'request')]"
+                    f"[contains(.//div[contains(@class,'request-meta')], '{reason_text}')]",
+                )
+            )
+        )
+
+        view_button = audit_request_card.find_element(
+            By.XPATH,
+            ".//button[normalize-space()='View']",
+        )
+
+        self.wait.until(
+            lambda driver: view_button.is_enabled()
+        )
+        view_button.click()
+
+        modal_audit = self.wait.until(
+            EC.visibility_of_element_located(
+                (By.ID, "modalAudit")
+            )
+        )
+
+        audit_text = modal_audit.text
+
+        self.assertTrue(
+            any(
+                token in audit_text.lower()
+                for token in (
+                    "notif",
+                    "notify",
+                    "notified",
+                )
+            ),
+            (
+                "Notification action was not found in the "
+                f"request audit trail.\n{audit_text}"
+            ),
+        )
+
+        return toast_text
+
+
+    def _login_existing_user(
+        self,
+        username,
+        password,
+        expected_path="/employee",
+    ):
+        """Log in an already-registered user through the real dashboard UI."""
+
+        self.driver.get(
+            f"{BASE_URL}/dashboard"
+        )
+
+        login_username = self.wait.until(
+            EC.visibility_of_element_located(
+                (
+                    By.CSS_SELECTOR,
+                    '#loginForm input[name="username"]',
+                )
+            )
+        )
+
+        login_password = self.driver.find_element(
+            By.CSS_SELECTOR,
+            '#loginForm input[name="password"]',
+        )
+
+        login_username.clear()
+        login_username.send_keys(username)
+
+        login_password.clear()
+        login_password.send_keys(password)
+
+        self.driver.find_element(
+            By.CSS_SELECTOR,
+            "#loginForm button",
+        ).click()
+
+        def login_finished(driver):
+            if expected_path in driver.current_url:
+                return True
+
+            try:
+                alert_text = driver.find_element(
+                    By.ID,
+                    "authAlert",
+                ).text.strip()
+            except Exception:
+                return False
+
+            if not alert_text:
+                return False
+
+            return f"Login failed: {alert_text}"
+
+        result = self.wait.until(login_finished)
+
+        self.assertIs(
+            result,
+            True,
+            f"Existing-user login failed for {username!r}. "
+            f"Current URL: {self.driver.current_url!r}",
+        )
+
+    def _verify_employee_final_status(
+        self,
+        employee_username,
+        employee_email,
+        employee_password,
+        reason_text,
+        expected_status,
+    ):
+        """Log the employee back in and verify final status + notification."""
+
+        self._login_existing_user(
+            employee_username,
+            employee_password,
+            expected_path="/employee",
+        )
+
+        self.assertIn(
+            "/employee",
+            self.driver.current_url,
+        )
+
+        # Employee queue is the third navigation button.
+        self.wait_click("#nav button:nth-child(3)")
+
+        request_card = self.wait.until(
+            EC.presence_of_element_located(
+                (
+                    By.XPATH,
+                    "//article[contains(@class,'request')]"
+                    f"[contains(.//div[contains(@class,'request-meta')], '{reason_text}')]",
+                )
+            )
+        )
+
+        self.assertIn(
+            expected_status,
+            request_card.text.upper(),
+        )
+
+        # Open the request and inspect its audit trail.
+        view_button = request_card.find_element(
+            By.XPATH,
+            ".//button[normalize-space()='View']",
+        )
+
+        self.wait.until(
+            lambda driver: view_button.is_enabled()
+        )
+        view_button.click()
+
+        modal_audit = self.wait.until(
+            EC.visibility_of_element_located(
+                (By.ID, "modalAudit")
+            )
+        )
+
+        audit_text = modal_audit.text
+
+        self.assertTrue(
+            any(
+                token in audit_text.lower()
+                for token in (
+                    "notif",
+                    "notify",
+                    "notified",
+                )
+            ),
+            (
+                "Employee could see the final status, but the "
+                "notification event was not visible in the audit trail.\n"
+                f"{audit_text}"
+            ),
+        )
+
+        return audit_text
+
+    def _run_week10_complete_workflow(
+        self,
+        suffix,
+        admin_approved,
+    ):
+        """
+        Full Week 10 acceptance flow:
+
+        Employee -> Submit -> HR Approve -> Manager Approve
+        -> Admin Finalize -> Super Admin Notify -> Employee Verify.
+        """
+
+        employee_username = (
+            f"week10_emp_{suffix}_{uuid.uuid4().hex[:8]}"
+        )
+        employee_email = (
+            f"{employee_username}@example.com"
+        )
+        employee_password = "Passw0rd!"
+
+        reason_text = (
+            f"Selenium Week 10 {suffix} "
+            f"{uuid.uuid4().hex[:8]}"
+        )
+
+        # --------------------------------------------------------
+        # 1. Employee registers and submits leave request.
+        # --------------------------------------------------------
+        self._register_user_and_login(
+            employee_username,
+            employee_email,
+            employee_password,
+            "employee",
+            "/employee",
+        )
+
+        self.assertIn(
+            "/employee",
+            self.driver.current_url,
+        )
+
+        self._submit_leave_request(
+            reason_text
+        )
+
+        # Verify initial state.
+        self.wait_click("#nav button:nth-child(3)")
+
+        self.wait.until(
+            lambda driver: (
+                reason_text
+                in driver.find_element(
+                    By.TAG_NAME,
+                    "body",
+                ).text
+                and "PENDING HR"
+                in driver.find_element(
+                    By.TAG_NAME,
+                    "body",
+                ).text
+            )
+        )
+
+        # --------------------------------------------------------
+        # 2. HR reviews and approves.
+        # --------------------------------------------------------
+        self._logout()
+        self._hr_decide(
+            reason_text,
+            approved=True,
+        )
+
+        # --------------------------------------------------------
+        # 3. Manager reviews and approves.
+        # --------------------------------------------------------
+        self._logout()
+        self._manager_decide(
+            reason_text,
+            approved=True,
+        )
+
+        # --------------------------------------------------------
+        # 4. Admin finalizes.
+        # --------------------------------------------------------
+        self._logout()
+        self._admin_decide(
+            reason_text,
+            approved=admin_approved,
+        )
+
+        expected_status = (
+            "APPROVED"
+            if admin_approved
+            else "REJECTED"
+        )
+
+        # --------------------------------------------------------
+        # 5. Super Admin notifies employee.
+        # --------------------------------------------------------
+        self._logout()
+
+        toast_text = self._super_admin_notify(
+            reason_text,
+            expected_status,
+        )
+
+        self.assertIn(
+            "Employee notified for leave #",
+            toast_text,
+        )
+
+        # --------------------------------------------------------
+        # 6. Employee sees final status and notification audit.
+        # --------------------------------------------------------
+        self._logout()
+
+        self._verify_employee_final_status(
+            employee_username,
+            employee_email,
+            employee_password,
+            reason_text,
+            expected_status,
+        )
+
+    def test_week10_complete_approval_workflow(self):
+        """Complete Week 10 approval path through employee notification."""
+
+        self._run_week10_complete_workflow(
+            suffix="approval",
+            admin_approved=True,
+        )
+
+    def test_week10_complete_rejection_workflow(self):
+        """Complete Week 10 rejection path through employee notification."""
+
+        self._run_week10_complete_workflow(
+            suffix="rejection",
+            admin_approved=False,
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
