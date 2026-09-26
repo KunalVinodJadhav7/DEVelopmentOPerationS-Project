@@ -24,6 +24,7 @@ pipeline {
     options {
         timestamps()
         disableConcurrentBuilds()
+
         timeout(
             time: 30,
             unit: 'MINUTES'
@@ -265,20 +266,28 @@ pipeline {
 
                     $pidFile = Join-Path $environmentDir "current.pid"
 
+                    # --------------------------------------------------
+                    # Stop previous FastAPI process
+                    # --------------------------------------------------
+
                     if (Test-Path $pidFile) {
 
-                        $oldPidText = Get-Content $pidFile -ErrorAction SilentlyContinue
+                        $oldPidText = Get-Content `
+                            $pidFile `
+                            -ErrorAction SilentlyContinue
 
                         if ($oldPidText -and $oldPidText.Trim() -ne "") {
 
                             try {
+
                                 $oldPid = [int]$oldPidText
 
                                 $oldProcess = Get-Process `
                                     -Id $oldPid `
                                     -ErrorAction Stop
 
-                                Write-Host "Stopping previous FastAPI process: PID $oldPid"
+                                Write-Host `
+                                    "Stopping previous FastAPI process: PID $oldPid"
 
                                 Stop-Process `
                                     -Id $oldPid `
@@ -287,64 +296,164 @@ pipeline {
 
                                 Start-Sleep -Seconds 1
 
-                                Write-Host "Previous FastAPI process stopped."
+                                Write-Host `
+                                    "Previous FastAPI process stopped."
                             }
                             catch {
-                                Write-Host "Previous FastAPI process was not running."
+
+                                Write-Host `
+                                    "Previous FastAPI process was not running."
                             }
                         }
                     }
 
-                    $stdout = Join-Path $releaseDir "uvicorn.out.log"
-                    $stderr = Join-Path $releaseDir "uvicorn.err.log"
+                    # --------------------------------------------------
+                    # FastAPI log files
+                    # --------------------------------------------------
+
+                    $stdout = Join-Path `
+                        $releaseDir `
+                        "uvicorn.out.log"
+
+                    $stderr = Join-Path `
+                        $releaseDir `
+                        "uvicorn.err.log"
 
                     Write-Host "Starting FastAPI application..."
 
-                    # Jenkins tracks spawned processes using JENKINS_NODE_COOKIE.
-                    # Change the cookie only while creating FastAPI so the
-                    # long-running Uvicorn process can survive the Pipeline step.
+                    # --------------------------------------------------
+                    # IMPORTANT:
+                    #
+                    # Do NOT use Start-Process directly for the long-
+                    # running FastAPI process here.
+                    #
+                    # Windows cmd.exe "start" launches the process
+                    # independently and returns immediately.
+                    #
+                    # stdout/stderr/stdin are explicitly detached.
+                    # JENKINS_NODE_COOKIE is changed for the spawned
+                    # process so Jenkins will not terminate it as a
+                    # build child process.
+                    # --------------------------------------------------
+
                     $originalCookie = $env:JENKINS_NODE_COOKIE
-                    $env:JENKINS_NODE_COOKIE = "leaveflow-$($env:BUILD_TAG)-$($env:BUILD_NUMBER)"
+
+                    $env:JENKINS_NODE_COOKIE = `
+                        "leaveflow-$($env:BUILD_TAG)-$($env:BUILD_NUMBER)"
 
                     try {
 
-                        $process = Start-Process `
-                            -FilePath $ciPython `
-                            -ArgumentList @(
-                                "-m",
-                                "uvicorn",
-                                "app.main:app",
-                                "--host",
-                                "127.0.0.1",
-                                "--port",
-                                "$port",
-                                "--proxy-headers"
-                            ) `
-                            -WorkingDirectory $releaseDir `
-                            -RedirectStandardOutput $stdout `
-                            -RedirectStandardError $stderr `
-                            -WindowStyle Hidden `
-                            -PassThru
+                        $startCommand = `
+                            'start "" /b "{0}" -m uvicorn app.main:app ' +
+                            '--host 127.0.0.1 ' +
+                            '--port {1} ' +
+                            '--proxy-headers ' +
+                            '1>"{2}" 2>"{3}" <nul'
+
+                        $startCommand = $startCommand -f `
+                            $ciPython,
+                            $port,
+                            $stdout,
+                            $stderr
+
+                        Write-Host "Launching detached FastAPI process..."
+
+                        & $env:ComSpec /d /c $startCommand
+
+                        if ($LASTEXITCODE -ne 0) {
+                            throw `
+                                "Windows failed to launch the FastAPI background process."
+                        }
                     }
                     finally {
 
-                        # Restore Jenkins' original cookie for the Pipeline process.
                         $env:JENKINS_NODE_COOKIE = $originalCookie
                     }
 
-                    if (-not $process) {
-                        throw "FastAPI process could not be started."
+                    # --------------------------------------------------
+                    # Locate the newly launched Python/Uvicorn process.
+                    # cmd.exe start does not directly return the PID, so
+                    # find it by executable path + Uvicorn command line.
+                    # --------------------------------------------------
+
+                    $process = $null
+
+                    for ($attempt = 1; $attempt -le 10; $attempt++) {
+
+                        try {
+
+                            $candidates = Get-CimInstance `
+                                Win32_Process `
+                                -Filter "Name = 'python.exe'" `
+                                -ErrorAction SilentlyContinue |
+                                Where-Object {
+
+                                    $_.ExecutablePath -eq $ciPython `
+                                    -and
+                                    $_.CommandLine -like "*uvicorn*app.main:app*"
+                                    -and
+                                    $_.CommandLine -like "*--port $port*"
+                                } |
+                                Sort-Object ProcessId -Descending
+
+                            if ($candidates) {
+
+                                $process = $candidates |
+                                    Select-Object -First 1
+
+                                break
+                            }
+                        }
+                        catch {
+
+                            Write-Host `
+                                "Could not query FastAPI process yet."
+                        }
+
+                        Start-Sleep -Seconds 1
                     }
 
-                    $process.Id | Set-Content $pidFile
+                    if (-not $process) {
 
-                    Write-Host "FastAPI started with PID: $($process.Id)"
+                        Write-Host "=========================================="
+                        Write-Host "FastAPI process could not be located."
+                        Write-Host "=========================================="
 
-                    Start-Sleep -Seconds 3
+                        Write-Host "FastAPI STDOUT"
+                        Write-Host "------------------------------------------"
 
-                    $process.Refresh()
+                        if (Test-Path $stdout) {
+                            Get-Content $stdout
+                        }
 
-                    if ($process.HasExited) {
+                        Write-Host "FastAPI STDERR"
+                        Write-Host "------------------------------------------"
+
+                        if (Test-Path $stderr) {
+                            Get-Content $stderr
+                        }
+
+                        throw "FastAPI process did not start successfully."
+                    }
+
+                    $processId = [int]$process.ProcessId
+
+                    $processId | Set-Content $pidFile
+
+                    Write-Host `
+                        "FastAPI process confirmed with PID: $processId"
+
+                    Start-Sleep -Seconds 2
+
+                    # --------------------------------------------------
+                    # Verify process is still alive before health check.
+                    # --------------------------------------------------
+
+                    $runningProcess = Get-Process `
+                        -Id $processId `
+                        -ErrorAction SilentlyContinue
+
+                    if (-not $runningProcess) {
 
                         Write-Host "FastAPI exited unexpectedly."
 
@@ -364,13 +473,21 @@ pipeline {
                             Get-Content $stderr
                         }
 
-                        throw "FastAPI process exited before health verification."
+                        throw `
+                            "FastAPI process exited before health verification."
                     }
 
-                    $healthUrl = "http://127.0.0.1:$port/openapi.json"
+                    # --------------------------------------------------
+                    # FastAPI health check
+                    # --------------------------------------------------
+
+                    $healthUrl = `
+                        "http://127.0.0.1:$port/openapi.json"
+
                     $healthy = $false
 
-                    Write-Host "Checking FastAPI health: $healthUrl"
+                    Write-Host `
+                        "Checking FastAPI health: $healthUrl"
 
                     for ($i = 1; $i -le 15; $i++) {
 
@@ -385,15 +502,19 @@ pipeline {
 
                                 $healthy = $true
 
-                                Write-Host "FastAPI health check successful."
-                                Write-Host "HTTP Status: $($response.StatusCode)"
+                                Write-Host `
+                                    "FastAPI health check successful."
+
+                                Write-Host `
+                                    "HTTP Status: $($response.StatusCode)"
 
                                 break
                             }
                         }
                         catch {
 
-                            Write-Host "Waiting for FastAPI... attempt $i/15"
+                            Write-Host `
+                                "Waiting for FastAPI... attempt $i/15"
                         }
 
                         Start-Sleep -Seconds 2
@@ -425,7 +546,7 @@ pipeline {
                     Write-Host "Environment : $envName"
                     Write-Host "Release     : $releaseDir"
                     Write-Host "Port        : $port"
-                    Write-Host "PID         : $($process.Id)"
+                    Write-Host "PID         : $processId"
                     Write-Host "URL         : http://127.0.0.1:$port"
                     Write-Host "=========================================="
                 '''
@@ -444,7 +565,8 @@ pipeline {
                         $port = 8001
                     }
 
-                    $url = "http://127.0.0.1:$port/openapi.json"
+                    $url = `
+                        "http://127.0.0.1:$port/openapi.json"
 
                     Write-Host "=========================================="
                     Write-Host "Final FastAPI Verification"
@@ -460,13 +582,17 @@ pipeline {
                         throw "FastAPI verification failed."
                     }
 
-                    Write-Host "Application is responding successfully."
-                    Write-Host "HTTP Status: $($response.StatusCode)"
+                    Write-Host `
+                        "Application is responding successfully."
+
+                    Write-Host `
+                        "HTTP Status: $($response.StatusCode)"
                 '''
             }
         }
 
         stage('Nginx Setup') {
+
             when {
                 expression {
                     return params.DEPLOY_ENV == 'production'
@@ -478,9 +604,17 @@ pipeline {
                     $ErrorActionPreference = "Stop"
 
                     $nginxHome = $env:NGINX_HOME
-                    $nginxExe = Join-Path $nginxHome "nginx.exe"
-                    $sourceConfig = Join-Path $env:WORKSPACE "nginx\\nginx.conf"
-                    $targetConfig = Join-Path $nginxHome "conf\\nginx.conf"
+                    $nginxExe = Join-Path `
+                        $nginxHome `
+                        "nginx.exe"
+
+                    $sourceConfig = Join-Path `
+                        $env:WORKSPACE `
+                        "nginx\\nginx.conf"
+
+                    $targetConfig = Join-Path `
+                        $nginxHome `
+                        "conf\\nginx.conf"
 
                     Write-Host "=========================================="
                     Write-Host "Nginx Configuration"
@@ -488,11 +622,13 @@ pipeline {
                     Write-Host "=========================================="
 
                     if (-not (Test-Path $nginxExe)) {
-                        throw "Nginx executable not found: $nginxExe"
+                        throw `
+                            "Nginx executable not found: $nginxExe"
                     }
 
                     if (-not (Test-Path $sourceConfig)) {
-                        throw "Repository Nginx configuration not found: $sourceConfig"
+                        throw `
+                            "Repository Nginx configuration not found: $sourceConfig"
                     }
 
                     Copy-Item `
@@ -500,10 +636,13 @@ pipeline {
                         -Destination $targetConfig `
                         -Force
 
-                    Write-Host "Nginx configuration copied to:"
+                    Write-Host `
+                        "Nginx configuration copied to:"
+
                     Write-Host $targetConfig
 
-                    Write-Host "Testing Nginx configuration..."
+                    Write-Host `
+                        "Testing Nginx configuration..."
 
                     & $nginxExe `
                         -p "$nginxHome\\" `
@@ -514,14 +653,17 @@ pipeline {
                         throw "Nginx configuration test failed."
                     }
 
-                    Write-Host "Nginx configuration test successful."
+                    Write-Host `
+                        "Nginx configuration test successful."
 
-                    $nginxProcesses = Get-Process nginx `
+                    $nginxProcesses = Get-Process `
+                        nginx `
                         -ErrorAction SilentlyContinue
 
                     if ($nginxProcesses) {
 
-                        Write-Host "Nginx is already running. Reloading configuration..."
+                        Write-Host `
+                            "Nginx is already running. Reloading configuration..."
 
                         & $nginxExe `
                             -p "$nginxHome\\" `
@@ -532,33 +674,72 @@ pipeline {
                             throw "Nginx reload failed."
                         }
 
-                        Write-Host "Nginx reload successful."
+                        Write-Host `
+                            "Nginx reload successful."
                     }
                     else {
 
-                        Write-Host "Nginx is not running. Starting Nginx..."
+                        Write-Host `
+                            "Nginx is not running. Starting Nginx..."
 
-                        Start-Process `
-                            -FilePath $nginxExe `
-                            -WorkingDirectory $nginxHome `
-                            -WindowStyle Hidden
+                        # Detach Nginx from Jenkins in the same way as
+                        # FastAPI. No Jenkins console handles are kept
+                        # open by the Nginx process.
+
+                        $originalCookie = `
+                            $env:JENKINS_NODE_COOKIE
+
+                        $env:JENKINS_NODE_COOKIE = `
+                            "leaveflow-nginx-$($env:BUILD_NUMBER)"
+
+                        try {
+
+                            $nginxStartCommand = `
+                                'start "" /b "{0}" ' +
+                                '-p "{1}\\" ' +
+                                '-c "conf\\nginx.conf" ' +
+                                '>nul 2>&1 <nul'
+
+                            $nginxStartCommand = `
+                                $nginxStartCommand -f `
+                                    $nginxExe,
+                                    $nginxHome
+
+                            & $env:ComSpec `
+                                /d `
+                                /c `
+                                $nginxStartCommand
+
+                            if ($LASTEXITCODE -ne 0) {
+                                throw `
+                                    "Windows failed to launch Nginx."
+                            }
+                        }
+                        finally {
+
+                            $env:JENKINS_NODE_COOKIE = `
+                                $originalCookie
+                        }
 
                         Start-Sleep -Seconds 3
 
-                        $nginxProcesses = Get-Process nginx `
+                        $nginxProcesses = Get-Process `
+                            nginx `
                             -ErrorAction SilentlyContinue
 
                         if (-not $nginxProcesses) {
                             throw "Nginx failed to start."
                         }
 
-                        Write-Host "Nginx started successfully."
+                        Write-Host `
+                            "Nginx started successfully."
                     }
                 '''
             }
         }
 
         stage('Nginx Verification') {
+
             when {
                 expression {
                     return params.DEPLOY_ENV == 'production'
@@ -569,7 +750,8 @@ pipeline {
                 powershell '''
                     $ErrorActionPreference = "Stop"
 
-                    $url = "http://localhost/openapi.json"
+                    $url = `
+                        "http://localhost/openapi.json"
 
                     Write-Host "=========================================="
                     Write-Host "Nginx End-to-End Verification"
@@ -591,27 +773,34 @@ pipeline {
 
                                 $healthy = $true
 
-                                Write-Host "Nginx reverse proxy verification successful."
-                                Write-Host "HTTP Status: $($response.StatusCode)"
+                                Write-Host `
+                                    "Nginx reverse proxy verification successful."
+
+                                Write-Host `
+                                    "HTTP Status: $($response.StatusCode)"
 
                                 break
                             }
                         }
                         catch {
 
-                            Write-Host "Waiting for Nginx... attempt $i/10"
+                            Write-Host `
+                                "Waiting for Nginx... attempt $i/10"
                         }
 
                         Start-Sleep -Seconds 2
                     }
 
                     if (-not $healthy) {
-                        throw "Nginx end-to-end verification failed."
+                        throw `
+                            "Nginx end-to-end verification failed."
                     }
 
                     Write-Host "=========================================="
-                    Write-Host "NGINX + FASTAPI VERIFICATION SUCCESSFUL"
-                    Write-Host "URL: http://localhost/openapi.json"
+                    Write-Host `
+                        "NGINX + FASTAPI VERIFICATION SUCCESSFUL"
+                    Write-Host `
+                        "URL: http://localhost/openapi.json"
                     Write-Host "=========================================="
                 '''
             }
