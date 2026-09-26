@@ -830,7 +830,7 @@ if (`$LASTEXITCODE -ne 0) {
                         env.BASE_URL =
                             'http://127.0.0.1:8001'
 
-                        echo `
+                        echo
                             'Selenium target: staging through FastAPI.'
                     }
                 }
@@ -839,7 +839,7 @@ if (`$LASTEXITCODE -ne 0) {
 
         stage('Verify Selenium Target') {
             steps {
-                echo `
+                echo
                     "Checking ${SELENIUM_BASE_URL} before Selenium..."
 
                 bat '''
@@ -886,7 +886,7 @@ if (`$LASTEXITCODE -ne 0) {
     post {
 
         success {
-            echo `
+            echo 
                 'Jenkins Week 10 CI/CD pipeline completed successfully.'
 
             echo(
