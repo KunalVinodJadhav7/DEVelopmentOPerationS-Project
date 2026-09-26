@@ -24,6 +24,7 @@ pipeline {
     options {
         timestamps()
         disableConcurrentBuilds()
+        skipDefaultCheckout()
 
         timeout(
             time: 30,
@@ -95,45 +96,6 @@ pipeline {
                     junit(
                         testResults: 'build/test-results/pytest-jenkins.xml',
                         allowEmptyResults: true
-                    )
-                }
-            }
-        }
-
-        stage('Verify Selenium Target') {
-            steps {
-                echo "Checking ${SELENIUM_BASE_URL} before Selenium..."
-
-                bat '''
-                    curl.exe -f --max-time 20 "%SELENIUM_BASE_URL%"
-                '''
-            }
-        }
-
-        stage('Selenium Integration Tests') {
-            steps {
-                echo 'Running Week 10 Selenium integration tests...'
-
-                bat '''
-                    if not exist test-results mkdir test-results
-                    if not exist selenium_tests\\artifacts mkdir selenium_tests\\artifacts
-
-                    .ci-venv\\Scripts\\python.exe -m pytest selenium_tests ^
-                        -v ^
-                        --junitxml=test-results\\selenium-results.xml
-                '''
-            }
-
-            post {
-                always {
-                    junit(
-                        allowEmptyResults: true,
-                        testResults: 'test-results/selenium-results.xml'
-                    )
-
-                    archiveArtifacts(
-                        allowEmptyArchive: true,
-                        artifacts: 'selenium_tests/artifacts/**/*'
                     )
                 }
             }
@@ -264,52 +226,62 @@ pipeline {
 
                     Write-Host "Runtime Python: $ciPython"
 
-                    $pidFile = Join-Path $environmentDir "current.pid"
+                    # ==========================================
+                    # Stop any existing process using deployment port
+                    # ==========================================
 
-                    # --------------------------------------------------
-                    # Stop previous FastAPI process
-                    # --------------------------------------------------
+                    Write-Host "Checking whether port $port is already in use..."
 
-                    if (Test-Path $pidFile) {
+                    $existingConnections = Get-NetTCPConnection `
+                        -LocalPort $port `
+                        -State Listen `
+                        -ErrorAction SilentlyContinue
 
-                        $oldPidText = Get-Content `
-                            $pidFile `
-                            -ErrorAction SilentlyContinue
+                    if ($existingConnections) {
 
-                        if ($oldPidText -and $oldPidText.Trim() -ne "") {
+                        $existingPid = $existingConnections |
+                            Select-Object -First 1 -ExpandProperty OwningProcess
 
-                            try {
+                        Write-Host `
+                            "Port $port is currently owned by PID $existingPid"
 
-                                $oldPid = [int]$oldPidText
+                        try {
 
-                                $oldProcess = Get-Process `
-                                    -Id $oldPid `
-                                    -ErrorAction Stop
+                            $existingProcess = Get-Process `
+                                -Id $existingPid `
+                                -ErrorAction Stop
 
-                                Write-Host `
-                                    "Stopping previous FastAPI process: PID $oldPid"
+                            Write-Host `
+                                "Stopping existing process: PID $existingPid"
 
-                                Stop-Process `
-                                    -Id $oldPid `
-                                    -Force `
-                                    -ErrorAction Stop
+                            Stop-Process `
+                                -Id $existingPid `
+                                -Force `
+                                -ErrorAction Stop
 
-                                Start-Sleep -Seconds 1
+                            Start-Sleep -Seconds 2
 
-                                Write-Host `
-                                    "Previous FastAPI process stopped."
-                            }
-                            catch {
+                            Write-Host `
+                                "Existing process stopped."
+                        }
+                        catch {
 
-                                Write-Host `
-                                    "Previous FastAPI process was not running."
-                            }
+                            Write-Host `
+                                "Existing PID $existingPid could not be stopped."
+
+                            throw `
+                                "Port $port is still occupied. Deployment cannot continue."
                         }
                     }
+                    else {
 
-                    # --------------------------------------------------
+                        Write-Host `
+                            "Port $port is available."
+                    }
+
+                    # ==========================================
                     # FastAPI log files
-                    # --------------------------------------------------
+                    # ==========================================
 
                     $stdout = Join-Path `
                         $releaseDir `
@@ -321,20 +293,9 @@ pipeline {
 
                     Write-Host "Starting FastAPI application..."
 
-                    # --------------------------------------------------
-                    # IMPORTANT:
-                    #
-                    # Do NOT use Start-Process directly for the long-
-                    # running FastAPI process here.
-                    #
-                    # Windows cmd.exe "start" launches the process
-                    # independently and returns immediately.
-                    #
-                    # stdout/stderr/stdin are explicitly detached.
-                    # JENKINS_NODE_COOKIE is changed for the spawned
-                    # process so Jenkins will not terminate it as a
-                    # build child process.
-                    # --------------------------------------------------
+                    # ==========================================
+                    # Detach FastAPI from Jenkins
+                    # ==========================================
 
                     $originalCookie = $env:JENKINS_NODE_COOKIE
 
@@ -343,7 +304,7 @@ pipeline {
 
                     try {
 
-                        $startCommand = `
+                        $startCommand =
                             'start "" /b "{0}" -m uvicorn app.main:app ' +
                             '--host 127.0.0.1 ' +
                             '--port {1} ' +
@@ -356,9 +317,13 @@ pipeline {
                             $stdout,
                             $stderr
 
-                        Write-Host "Launching detached FastAPI process..."
+                        Write-Host `
+                            "Launching detached FastAPI process..."
 
-                        & $env:ComSpec /d /c $startCommand
+                        & $env:ComSpec `
+                            /d `
+                            /c `
+                            $startCommand
 
                         if ($LASTEXITCODE -ne 0) {
                             throw `
@@ -370,116 +335,12 @@ pipeline {
                         $env:JENKINS_NODE_COOKIE = $originalCookie
                     }
 
-                    # --------------------------------------------------
-                    # Locate the newly launched Python/Uvicorn process.
-                    # cmd.exe start does not directly return the PID, so
-                    # find it by executable path + Uvicorn command line.
-                    # --------------------------------------------------
-
-                    $process = $null
-
-                    for ($attempt = 1; $attempt -le 10; $attempt++) {
-
-                        try {
-
-                            $candidates = Get-CimInstance `
-                                Win32_Process `
-                                -Filter "Name = 'python.exe'" `
-                                -ErrorAction SilentlyContinue |
-                                Where-Object {
-
-                                    $_.ExecutablePath -eq $ciPython `
-                                    -and
-                                    $_.CommandLine -like "*uvicorn*app.main:app*"
-                                    -and
-                                    $_.CommandLine -like "*--port $port*"
-                                } |
-                                Sort-Object ProcessId -Descending
-
-                            if ($candidates) {
-
-                                $process = $candidates |
-                                    Select-Object -First 1
-
-                                break
-                            }
-                        }
-                        catch {
-
-                            Write-Host `
-                                "Could not query FastAPI process yet."
-                        }
-
-                        Start-Sleep -Seconds 1
-                    }
-
-                    if (-not $process) {
-
-                        Write-Host "=========================================="
-                        Write-Host "FastAPI process could not be located."
-                        Write-Host "=========================================="
-
-                        Write-Host "FastAPI STDOUT"
-                        Write-Host "------------------------------------------"
-
-                        if (Test-Path $stdout) {
-                            Get-Content $stdout
-                        }
-
-                        Write-Host "FastAPI STDERR"
-                        Write-Host "------------------------------------------"
-
-                        if (Test-Path $stderr) {
-                            Get-Content $stderr
-                        }
-
-                        throw "FastAPI process did not start successfully."
-                    }
-
-                    $processId = [int]$process.ProcessId
-
-                    $processId | Set-Content $pidFile
-
                     Write-Host `
-                        "FastAPI process confirmed with PID: $processId"
+                        "FastAPI launch command returned successfully."
 
-                    Start-Sleep -Seconds 2
-
-                    # --------------------------------------------------
-                    # Verify process is still alive before health check.
-                    # --------------------------------------------------
-
-                    $runningProcess = Get-Process `
-                        -Id $processId `
-                        -ErrorAction SilentlyContinue
-
-                    if (-not $runningProcess) {
-
-                        Write-Host "FastAPI exited unexpectedly."
-
-                        Write-Host "=========================================="
-                        Write-Host "FastAPI STDOUT"
-                        Write-Host "=========================================="
-
-                        if (Test-Path $stdout) {
-                            Get-Content $stdout
-                        }
-
-                        Write-Host "=========================================="
-                        Write-Host "FastAPI STDERR"
-                        Write-Host "=========================================="
-
-                        if (Test-Path $stderr) {
-                            Get-Content $stderr
-                        }
-
-                        throw `
-                            "FastAPI process exited before health verification."
-                    }
-
-                    # --------------------------------------------------
+                    # ==========================================
                     # FastAPI health check
-                    # --------------------------------------------------
+                    # ==========================================
 
                     $healthUrl = `
                         "http://127.0.0.1:$port/openapi.json"
@@ -546,7 +407,6 @@ pipeline {
                     Write-Host "Environment : $envName"
                     Write-Host "Release     : $releaseDir"
                     Write-Host "Port        : $port"
-                    Write-Host "PID         : $processId"
                     Write-Host "URL         : http://127.0.0.1:$port"
                     Write-Host "=========================================="
                 '''
@@ -604,6 +464,7 @@ pipeline {
                     $ErrorActionPreference = "Stop"
 
                     $nginxHome = $env:NGINX_HOME
+
                     $nginxExe = Join-Path `
                         $nginxHome `
                         "nginx.exe"
@@ -682,10 +543,6 @@ pipeline {
                         Write-Host `
                             "Nginx is not running. Starting Nginx..."
 
-                        # Detach Nginx from Jenkins in the same way as
-                        # FastAPI. No Jenkins console handles are kept
-                        # open by the Nginx process.
-
                         $originalCookie = `
                             $env:JENKINS_NODE_COOKIE
 
@@ -694,7 +551,7 @@ pipeline {
 
                         try {
 
-                            $nginxStartCommand = `
+                            $nginxStartCommand =
                                 'start "" /b "{0}" ' +
                                 '-p "{1}\\" ' +
                                 '-c "conf\\nginx.conf" ' +
@@ -805,20 +662,100 @@ pipeline {
                 '''
             }
         }
+
+        stage('Configure Selenium Target') {
+            steps {
+                script {
+
+                    if (params.DEPLOY_ENV == 'production') {
+
+                        env.SELENIUM_BASE_URL = `
+                            'http://localhost/dashboard'
+
+                        env.BASE_URL = `
+                            'http://localhost'
+
+                        echo `
+                            'Selenium target configured for production through Nginx.'
+
+                    }
+                    else {
+
+                        env.SELENIUM_BASE_URL = `
+                            'http://127.0.0.1:8001/dashboard'
+
+                        env.BASE_URL = `
+                            'http://127.0.0.1:8001'
+
+                        echo `
+                            'Selenium target configured for staging through FastAPI.'
+                    }
+                }
+            }
+        }
+
+        stage('Verify Selenium Target') {
+            steps {
+
+                echo `
+                    "Checking ${SELENIUM_BASE_URL} before Selenium..."
+
+                bat '''
+                    curl.exe -f --max-time 20 "%SELENIUM_BASE_URL%"
+                '''
+            }
+        }
+
+        stage('Selenium Integration Tests') {
+            steps {
+                echo 'Running Week 10 Selenium integration tests...'
+
+                bat '''
+                    if not exist test-results mkdir test-results
+                    if not exist selenium_tests\\artifacts mkdir selenium_tests\\artifacts
+
+                    .ci-venv\\Scripts\\python.exe -m pytest selenium_tests ^
+                        -v ^
+                        --junitxml=test-results\\selenium-results.xml
+                '''
+            }
+
+            post {
+                always {
+
+                    junit(
+                        allowEmptyResults: true,
+                        testResults: 'test-results/selenium-results.xml'
+                    )
+
+                    archiveArtifacts(
+                        allowEmptyArchive: true,
+                        artifacts: 'selenium_tests/artifacts/**/*'
+                    )
+                }
+            }
+        }
     }
 
     post {
 
         success {
-            echo 'Jenkins Week 10 CI/CD pipeline completed successfully.'
-            echo 'Build, tests, Gradle packaging, artifact archiving, FastAPI deployment, verification, and Nginx verification succeeded where applicable.'
+            echo `
+                'Jenkins Week 10 CI/CD pipeline completed successfully.'
+
+            echo `
+                'Build, unit tests, deployment, Selenium integration tests, ' +
+                'artifact archiving, FastAPI verification, and Nginx verification ' +
+                'succeeded where applicable.'
         }
 
         failure {
-            echo 'Jenkins Week 10 pipeline failed. Check the failed stage and console output.'
+            echo `
+                'Jenkins Week 10 pipeline failed. Check the failed stage and console output.'
         }
 
         always {
+
             archiveArtifacts(
                 artifacts: 'build/dist/*.zip,*.log',
                 allowEmptyArchive: true
