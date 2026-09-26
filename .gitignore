@@ -26,4 +26,6 @@ build/
 .gradle/
 
 # User-uploaded files
+uploads/selenium_tests/artifacts/
+selenium_tests/artifacts/
 uploads/

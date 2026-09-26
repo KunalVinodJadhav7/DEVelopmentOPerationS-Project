@@ -1,4 +1,3 @@
-from combined_leave_approval_assignment.selenium_tests.conftest import driver
 from pathlib import Path
 
 from selenium.webdriver.common.by import By
@@ -21,7 +20,10 @@ def test_application_opens(driver, base_url):
 
     assert driver.current_url.startswith(base_url)
 
-    body_text = driver.find_element(By.TAG_NAME, "body").text.strip()
+    body_text = driver.find_element(
+        By.TAG_NAME,
+        "body"
+    ).text.strip()
 
     assert body_text, "Application page contains no visible body text"
 
@@ -45,6 +47,12 @@ def test_application_ui_inventory(driver, base_url):
             (By.TAG_NAME, "body")
         )
     )
+
+    # Capture body text for diagnostics if the UI contains no controls.
+    body_text = driver.find_element(
+        By.TAG_NAME,
+        "body"
+    ).text.strip()
 
     links = driver.find_elements(By.TAG_NAME, "a")
     buttons = driver.find_elements(By.TAG_NAME, "button")
@@ -124,7 +132,10 @@ def test_application_ui_inventory(driver, base_url):
         / "ui_inventory.txt"
     )
 
-    inventory_file.parent.mkdir(parents=True, exist_ok=True)
+    inventory_file.parent.mkdir(
+        parents=True,
+        exist_ok=True
+    )
 
     inventory_file.write_text(
         "\n".join(output),
