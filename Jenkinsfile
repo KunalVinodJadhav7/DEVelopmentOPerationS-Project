@@ -35,29 +35,28 @@ pipeline {
     stages {
 
         // ============================================================
-        // VALIDATION & CHECKOUT
+        // VALIDATION
         // ============================================================
 
-        stage('Validate Deployment Parameter') {
+        stage('Validate Parameters') {
             steps {
                 script {
                     if (!params.DEPLOY_ENV?.trim()) {
-                        error(
-                            'DEPLOY_ENV was not provided. ' +
-                            'Use Build with Parameters and select staging or production.'
-                        )
+                        error('DEPLOY_ENV must be selected.')
                     }
 
-                    echo "Selected deployment environment: ${params.DEPLOY_ENV}"
+                    echo "Deployment environment: ${params.DEPLOY_ENV}"
                 }
             }
         }
 
-        stage('GitHub Checkout') {
+        // ============================================================
+        // CHECKOUT
+        // ============================================================
+
+        stage('Checkout') {
             steps {
                 deleteDir()
-
-                echo 'Checking out Employee Leave Approval System from GitHub...'
 
                 git(
                     branch: 'main',
@@ -66,12 +65,11 @@ pipeline {
                 )
 
                 bat 'git log -1 --oneline'
-                bat 'dir'
             }
         }
 
         // ============================================================
-        // PYTHON SETUP & TESTING
+        // PYTHON
         // ============================================================
 
         stage('Python Setup') {
@@ -79,6 +77,11 @@ pipeline {
                 echo 'Creating Python CI environment...'
 
                 bat '''
+                    if not exist "%PYTHON_EXE%" (
+                        echo ERROR: Python executable not found.
+                        exit /b 1
+                    )
+
                     "%PYTHON_EXE%" -m venv .ci-venv
 
                     .ci-venv\\Scripts\\python.exe -m pip install --upgrade pip
@@ -88,9 +91,13 @@ pipeline {
             }
         }
 
+        // ============================================================
+        // UNIT TESTS
+        // ============================================================
+
         stage('Unit Tests') {
             steps {
-                echo 'Running Python unit tests...'
+                echo 'Running unit tests...'
 
                 bat '''
                     if not exist build\\test-results mkdir build\\test-results
@@ -117,43 +124,46 @@ pipeline {
 
         stage('Gradle Build') {
             steps {
-                echo 'Running Gradle build and packaging...'
+                echo 'Building application with Gradle...'
 
                 bat '''
                     where gradle
                     gradle --version
 
-                    gradle --no-daemon clean build "-PappVersion=1.0.%BUILD_NUMBER%"
+                    gradle --no-daemon clean build ^
+                        "-PappVersion=1.0.%BUILD_NUMBER%"
                 '''
             }
         }
 
+        // ============================================================
+        // ARTIFACT VERIFICATION
+        // ============================================================
+
         stage('Verify Artifact') {
             steps {
-                echo 'Verifying generated ZIP artifact...'
-
                 bat '''
                     if not exist build\\dist (
-                        echo ERROR: build\\dist directory was not created.
+                        echo ERROR: build\\dist does not exist.
                         exit /b 1
                     )
 
                     dir build\\dist
 
                     if not exist build\\dist\\*.zip (
-                        echo ERROR: ZIP artifact was not created.
+                        echo ERROR: No ZIP artifact found.
                         exit /b 1
                     )
-
-                    echo ZIP artifact successfully created.
                 '''
             }
         }
 
-        stage('Archive ZIP Artifact') {
-            steps {
-                echo 'Archiving ZIP artifact in Jenkins...'
+        // ============================================================
+        // ARCHIVE ARTIFACT
+        // ============================================================
 
+        stage('Archive Artifact') {
+            steps {
                 archiveArtifacts(
                     artifacts: 'build/dist/*.zip',
                     fingerprint: true
@@ -165,7 +175,7 @@ pipeline {
         // FASTAPI DEPLOYMENT
         // ============================================================
 
-        stage('Deploy') {
+        stage('Deploy FastAPI') {
             options {
                 timeout(
                     time: 5,
@@ -176,6 +186,10 @@ pipeline {
             steps {
                 powershell '''
                     $ErrorActionPreference = "Stop"
+
+                    # ------------------------------------------------
+                    # Deployment configuration
+                    # ------------------------------------------------
 
                     $envName = $env:DEPLOY_ENV
                     $root = $env:DEPLOY_ROOT
@@ -195,104 +209,26 @@ pipeline {
                     }
 
                     Write-Host "=========================================="
-                    Write-Host "Starting FastAPI deployment"
+                    Write-Host "FastAPI Deployment"
                     Write-Host "Environment : $envName"
                     Write-Host "Port        : $port"
                     Write-Host "=========================================="
 
-                    $environmentDir = Join-Path $root $envName
-                    $releaseDir = Join-Path $environmentDir $env:BUILD_NUMBER
+                    # ------------------------------------------------
+                    # Paths
+                    # ------------------------------------------------
 
-                    New-Item `
-                        -ItemType Directory `
-                        -Force `
-                        -Path $environmentDir | Out-Null
+                    $environmentDir = Join-Path `
+                        $root `
+                        $envName
 
-                    New-Item `
-                        -ItemType Directory `
-                        -Force `
-                        -Path $releaseDir | Out-Null
+                    $releaseDir = Join-Path `
+                        $environmentDir `
+                        $env:BUILD_NUMBER
 
-                    Write-Host "Release directory: $releaseDir"
-
-                    $zip = Get-ChildItem "build\\dist\\*.zip" |
-                        Sort-Object LastWriteTime -Descending |
-                        Select-Object -First 1
-
-                    if (-not $zip) {
-                        throw "Application ZIP was not found."
-                    }
-
-                    Write-Host "Deploying artifact: $($zip.FullName)"
-
-                    Expand-Archive `
-                        -LiteralPath $zip.FullName `
-                        -DestinationPath $releaseDir `
-                        -Force
-
-                    $appFile = Join-Path $releaseDir "app\\main.py"
-
-                    if (-not (Test-Path $appFile)) {
-                        throw "FastAPI application not found: $appFile"
-                    }
-
-                    Write-Host "FastAPI application found: $appFile"
-
-                    $ciPython = Join-Path `
+                    $python = Join-Path `
                         $env:WORKSPACE `
                         ".ci-venv\\Scripts\\python.exe"
-
-                    if (-not (Test-Path $ciPython)) {
-                        throw "Jenkins Python environment not found: $ciPython"
-                    }
-
-                    Write-Host "Runtime Python: $ciPython"
-
-                    # ------------------------------------------------
-                    # Stop existing FastAPI process
-                    # ------------------------------------------------
-
-                    Write-Host "Checking whether port $port is already in use..."
-
-                    $existingConnections = Get-NetTCPConnection `
-                        -LocalPort $port `
-                        -State Listen `
-                        -ErrorAction SilentlyContinue
-
-                    if ($existingConnections) {
-
-                        $existingPid = $existingConnections |
-                            Select-Object -First 1 -ExpandProperty OwningProcess
-
-                        Write-Host "Port $port is owned by PID $existingPid"
-
-                        try {
-                            Get-Process `
-                                -Id $existingPid `
-                                -ErrorAction Stop | Out-Null
-
-                            Write-Host "Stopping existing process: PID $existingPid"
-
-                            Stop-Process `
-                                -Id $existingPid `
-                                -Force `
-                                -ErrorAction Stop
-
-                            Start-Sleep -Seconds 2
-
-                            Write-Host "Existing process stopped."
-                        }
-                        catch {
-                            throw "Port $port is still occupied. Deployment cannot continue."
-                        }
-                    }
-                    else {
-                        Write-Host "Port $port is available."
-                    }
-
-                    # ------------------------------------------------
-                    # FastAPI logs
-                    # ------------------------------------------------
 
                     $stdout = Join-Path `
                         $releaseDir `
@@ -303,10 +239,151 @@ pipeline {
                         "uvicorn.err.log"
 
                     # ------------------------------------------------
-                    # Start FastAPI detached from Jenkins
+                    # Validate Python
                     # ------------------------------------------------
 
-                    Write-Host "Starting FastAPI application..."
+                    if (-not (Test-Path $python)) {
+                        throw "CI Python environment not found: $python"
+                    }
+
+                    # ------------------------------------------------
+                    # Create release directory
+                    # ------------------------------------------------
+
+                    New-Item `
+                        -ItemType Directory `
+                        -Path $releaseDir `
+                        -Force | Out-Null
+
+                    Write-Host "Release directory:"
+                    Write-Host $releaseDir
+
+                    # ------------------------------------------------
+                    # Find artifact
+                    # ------------------------------------------------
+
+                    $zip = Get-ChildItem `
+                        -Path "build\\dist\\*.zip" |
+                        Sort-Object LastWriteTime -Descending |
+                        Select-Object -First 1
+
+                    if (-not $zip) {
+                        throw "Application ZIP artifact not found."
+                    }
+
+                    Write-Host "Artifact:"
+                    Write-Host $zip.FullName
+
+                    # ------------------------------------------------
+                    # Extract artifact
+                    # ------------------------------------------------
+
+                    Expand-Archive `
+                        -LiteralPath $zip.FullName `
+                        -DestinationPath $releaseDir `
+                        -Force
+
+                    # ------------------------------------------------
+                    # Verify application
+                    # ------------------------------------------------
+
+                    $appFile = Join-Path `
+                        $releaseDir `
+                        "app\\main.py"
+
+                    if (-not (Test-Path $appFile)) {
+                        throw "FastAPI application not found: $appFile"
+                    }
+
+                    Write-Host "FastAPI application found."
+
+                    # ------------------------------------------------
+                    # Stop existing process
+                    # ------------------------------------------------
+
+                    Write-Host "Checking port $port..."
+
+                    $connections = Get-NetTCPConnection `
+                        -LocalPort $port `
+                        -State Listen `
+                        -ErrorAction SilentlyContinue
+
+                    if ($connections) {
+
+                        $pids = $connections |
+                            Select-Object -ExpandProperty OwningProcess -Unique
+
+                        foreach ($pid in $pids) {
+
+                            $process = Get-Process `
+                                -Id $pid `
+                                -ErrorAction SilentlyContinue
+
+                            if ($process) {
+
+                                Write-Host `
+                                    "Port $port is used by PID $pid ($($process.ProcessName))."
+
+                                if ($process.ProcessName -notin @(
+                                    "python",
+                                    "pythonw"
+                                )) {
+                                    throw `
+                                        "Port $port is occupied by unexpected process: $($process.ProcessName)"
+                                }
+
+                                Write-Host `
+                                    "Stopping FastAPI process PID $pid..."
+
+                                Stop-Process `
+                                    -Id $pid `
+                                    -Force `
+                                    -ErrorAction Stop
+                            }
+                        }
+
+                        # Wait for port to become free.
+                        $portFree = $false
+
+                        for ($i = 1; $i -le 15; $i++) {
+
+                            $listening = Get-NetTCPConnection `
+                                -LocalPort $port `
+                                -State Listen `
+                                -ErrorAction SilentlyContinue
+
+                            if (-not $listening) {
+                                $portFree = $true
+                                break
+                            }
+
+                            Start-Sleep -Seconds 1
+                        }
+
+                        if (-not $portFree) {
+                            throw "Port $port did not become available."
+                        }
+                    }
+
+                    Write-Host "Port $port is available."
+
+                    # ------------------------------------------------
+                    # Start FastAPI
+                    # ------------------------------------------------
+
+                    $command = @(
+                        "`"$python`""
+                        "-m"
+                        "uvicorn"
+                        "app.main:app"
+                        "--host"
+                        "127.0.0.1"
+                        "--port"
+                        "$port"
+                        "--proxy-headers"
+                    ) -join " "
+
+                    Write-Host "Starting FastAPI..."
 
                     $originalCookie = $env:JENKINS_NODE_COOKIE
 
@@ -314,6 +391,7 @@ pipeline {
                         "leaveflow-$($env:BUILD_TAG)-$($env:BUILD_NUMBER)"
 
                     try {
+
                         $startCommand =
                             'start "" /b "{0}" -m uvicorn app.main:app ' +
                             '--host 127.0.0.1 ' +
@@ -322,58 +400,71 @@ pipeline {
                             '1>"{2}" 2>"{3}" <nul'
 
                         $startCommand = $startCommand -f `
-                            $ciPython,
+                            $python,
                             $port,
                             $stdout,
                             $stderr
 
-                        Write-Host "Launching detached FastAPI process..."
-
                         & $env:ComSpec /d /c $startCommand
 
                         if ($LASTEXITCODE -ne 0) {
-                            throw "Windows failed to launch the FastAPI background process."
+                            throw "Failed to start FastAPI."
                         }
+
                     }
                     finally {
                         $env:JENKINS_NODE_COOKIE = $originalCookie
                     }
 
-                    Write-Host "FastAPI launch command returned successfully."
+                    Write-Host "FastAPI process launched."
 
                     # ------------------------------------------------
-                    # FastAPI health check
+                    # Health check
                     # ------------------------------------------------
 
-                    $healthUrl = "http://127.0.0.1:$port/openapi.json"
+                    $healthUrl =
+                        "http://127.0.0.1:$port/openapi.json"
+
                     $healthy = $false
 
-                    Write-Host "Checking FastAPI health: $healthUrl"
+                    Write-Host "Checking:"
+                    Write-Host $healthUrl
 
                     for ($i = 1; $i -le 15; $i++) {
+
                         try {
+
                             $response = Invoke-WebRequest `
                                 -Uri $healthUrl `
                                 -UseBasicParsing `
                                 -TimeoutSec 5
 
                             if ($response.StatusCode -eq 200) {
+
                                 $healthy = $true
 
-                                Write-Host "FastAPI health check successful."
-                                Write-Host "HTTP Status: $($response.StatusCode)"
+                                Write-Host `
+                                    "FastAPI is healthy. HTTP $($response.StatusCode)"
 
                                 break
                             }
+
                         }
                         catch {
-                            Write-Host "Waiting for FastAPI... attempt $i/15"
+
+                            Write-Host `
+                                "Waiting for FastAPI... $i/15"
                         }
 
                         Start-Sleep -Seconds 2
                     }
 
+                    # ------------------------------------------------
+                    # Failure diagnostics
+                    # ------------------------------------------------
+
                     if (-not $healthy) {
+
                         Write-Host "=========================================="
                         Write-Host "FastAPI STDOUT"
                         Write-Host "=========================================="
@@ -393,6 +484,10 @@ pipeline {
                         throw "FastAPI health check failed."
                     }
 
+                    # ------------------------------------------------
+                    # Success
+                    # ------------------------------------------------
+
                     Write-Host "=========================================="
                     Write-Host "FASTAPI DEPLOYMENT SUCCESSFUL"
                     Write-Host "Environment : $envName"
@@ -408,24 +503,22 @@ pipeline {
         // DEPLOYMENT VERIFICATION
         // ============================================================
 
-        stage('Deployment Verification') {
+        stage('Verify FastAPI') {
             steps {
                 powershell '''
                     $ErrorActionPreference = "Stop"
 
-                    if ($env:DEPLOY_ENV -eq "production") {
-                        $port = 8000
-                    }
-                    else {
-                        $port = 8001
+                    $port = switch ($env:DEPLOY_ENV) {
+                        "production" { 8000 }
+                        "staging"    { 8001 }
+                        default      { throw "Invalid deployment environment." }
                     }
 
-                    $url = "http://127.0.0.1:$port/openapi.json"
+                    $url =
+                        "http://127.0.0.1:$port/openapi.json"
 
-                    Write-Host "=========================================="
-                    Write-Host "Final FastAPI Verification"
-                    Write-Host "Testing: $url"
-                    Write-Host "=========================================="
+                    Write-Host "Verifying FastAPI:"
+                    Write-Host $url
 
                     $response = Invoke-WebRequest `
                         -Uri $url `
@@ -436,17 +529,17 @@ pipeline {
                         throw "FastAPI verification failed."
                     }
 
-                    Write-Host "Application is responding successfully."
-                    Write-Host "HTTP Status: $($response.StatusCode)"
+                    Write-Host `
+                        "FastAPI verification successful. HTTP $($response.StatusCode)"
                 '''
             }
         }
 
         // ============================================================
-        // NGINX
+        // NGINX PRODUCTION
         // ============================================================
 
-        stage('Nginx Setup') {
+        stage('Configure Nginx') {
             when {
                 expression {
                     params.DEPLOY_ENV == 'production'
@@ -473,7 +566,6 @@ pipeline {
 
                     Write-Host "=========================================="
                     Write-Host "Nginx Configuration"
-                    Write-Host "Nginx Home: $nginxHome"
                     Write-Host "=========================================="
 
                     if (-not (Test-Path $nginxExe)) {
@@ -481,7 +573,7 @@ pipeline {
                     }
 
                     if (-not (Test-Path $sourceConfig)) {
-                        throw "Repository Nginx configuration not found: $sourceConfig"
+                        throw "Nginx configuration not found: $sourceConfig"
                     }
 
                     Copy-Item `
@@ -489,10 +581,11 @@ pipeline {
                         -Destination $targetConfig `
                         -Force
 
-                    Write-Host "Nginx configuration copied to:"
-                    Write-Host $targetConfig
+                    Write-Host "Nginx configuration copied."
 
-                    Write-Host "Testing Nginx configuration..."
+                    # ------------------------------------------------
+                    # Validate configuration
+                    # ------------------------------------------------
 
                     & $nginxExe `
                         -p "$nginxHome\\" `
@@ -503,15 +596,19 @@ pipeline {
                         throw "Nginx configuration test failed."
                     }
 
-                    Write-Host "Nginx configuration test successful."
+                    Write-Host "Nginx configuration is valid."
+
+                    # ------------------------------------------------
+                    # Start or reload Nginx
+                    # ------------------------------------------------
 
                     $nginxProcesses = Get-Process `
-                        nginx `
+                        -Name nginx `
                         -ErrorAction SilentlyContinue
 
                     if ($nginxProcesses) {
 
-                        Write-Host "Nginx is already running. Reloading configuration..."
+                        Write-Host "Nginx is running. Reloading..."
 
                         & $nginxExe `
                             -p "$nginxHome\\" `
@@ -522,45 +619,50 @@ pipeline {
                             throw "Nginx reload failed."
                         }
 
-                        Write-Host "Nginx reload successful."
+                        Write-Host "Nginx reloaded successfully."
+
                     }
                     else {
 
-                        Write-Host "Nginx is not running. Starting Nginx..."
+                        Write-Host "Nginx is not running. Starting..."
 
-                        $originalCookie = $env:JENKINS_NODE_COOKIE
+                        $originalCookie =
+                            $env:JENKINS_NODE_COOKIE
 
                         $env:JENKINS_NODE_COOKIE =
                             "leaveflow-nginx-$($env:BUILD_NUMBER)"
 
                         try {
-                            $nginxStartCommand =
+
+                            $startCommand =
                                 'start "" /b "{0}" ' +
                                 '-p "{1}\\" ' +
                                 '-c "conf\\nginx.conf" ' +
                                 '>nul 2>&1 <nul'
 
-                            $nginxStartCommand = $nginxStartCommand -f `
+                            $startCommand = $startCommand -f `
                                 $nginxExe,
                                 $nginxHome
 
                             & $env:ComSpec `
                                 /d `
                                 /c `
-                                $nginxStartCommand
+                                $startCommand
 
                             if ($LASTEXITCODE -ne 0) {
-                                throw "Windows failed to launch Nginx."
+                                throw "Failed to start Nginx."
                             }
+
                         }
                         finally {
-                            $env:JENKINS_NODE_COOKIE = $originalCookie
+                            $env:JENKINS_NODE_COOKIE =
+                                $originalCookie
                         }
 
                         Start-Sleep -Seconds 3
 
                         $nginxProcesses = Get-Process `
-                            nginx `
+                            -Name nginx `
                             -ErrorAction SilentlyContinue
 
                         if (-not $nginxProcesses) {
@@ -573,7 +675,11 @@ pipeline {
             }
         }
 
-        stage('Nginx Verification') {
+        // ============================================================
+        // NGINX VERIFICATION
+        // ============================================================
+
+        stage('Verify Nginx') {
             when {
                 expression {
                     params.DEPLOY_ENV == 'production'
@@ -584,77 +690,91 @@ pipeline {
                 powershell '''
                     $ErrorActionPreference = "Stop"
 
-                    $url = "http://localhost/openapi.json"
+                    $url =
+                        "http://localhost/openapi.json"
+
                     $healthy = $false
 
-                    Write-Host "=========================================="
-                    Write-Host "Nginx End-to-End Verification"
-                    Write-Host "Testing: $url"
-                    Write-Host "=========================================="
+                    Write-Host "Testing Nginx reverse proxy:"
+                    Write-Host $url
 
                     for ($i = 1; $i -le 10; $i++) {
+
                         try {
+
                             $response = Invoke-WebRequest `
                                 -Uri $url `
                                 -UseBasicParsing `
                                 -TimeoutSec 5
 
                             if ($response.StatusCode -eq 200) {
+
                                 $healthy = $true
 
-                                Write-Host "Nginx reverse proxy verification successful."
-                                Write-Host "HTTP Status: $($response.StatusCode)"
+                                Write-Host `
+                                    "Nginx verification successful."
 
                                 break
                             }
+
                         }
                         catch {
-                            Write-Host "Waiting for Nginx... attempt $i/10"
+
+                            Write-Host `
+                                "Waiting for Nginx... $i/10"
                         }
 
                         Start-Sleep -Seconds 2
                     }
 
                     if (-not $healthy) {
-                        throw "Nginx end-to-end verification failed."
+                        throw "Nginx reverse proxy verification failed."
                     }
 
-                    Write-Host "=========================================="
-                    Write-Host "NGINX + FASTAPI VERIFICATION SUCCESSFUL"
-                    Write-Host "URL: http://localhost/openapi.json"
-                    Write-Host "=========================================="
+                    Write-Host "Nginx + FastAPI are responding correctly."
                 '''
             }
         }
 
         // ============================================================
-        // SELENIUM
+        // SELENIUM CONFIGURATION
         // ============================================================
 
-        stage('Configure Selenium Target') {
+        stage('Configure Selenium') {
             steps {
                 script {
-                    if (params.DEPLOY_ENV == 'production') {
-                        env.SELENIUM_BASE_URL = 'http://localhost/dashboard'
-                        env.BASE_URL = 'http://localhost'
 
-                        echo 'Selenium target configured for production through Nginx.'
-                    }
-                    else {
+                    if (params.DEPLOY_ENV == 'production') {
+
+                        env.SELENIUM_BASE_URL =
+                            'http://localhost/dashboard'
+
+                        env.BASE_URL =
+                            'http://localhost'
+
+                        echo 'Selenium target: production/Nginx'
+
+                    } else {
+
                         env.SELENIUM_BASE_URL =
                             'http://127.0.0.1:8001/dashboard'
 
-                        env.BASE_URL = 'http://127.0.0.1:8001'
+                        env.BASE_URL =
+                            'http://127.0.0.1:8001'
 
-                        echo 'Selenium target configured for staging through FastAPI.'
+                        echo 'Selenium target: staging/FastAPI'
                     }
                 }
             }
         }
 
+        // ============================================================
+        // SELENIUM TARGET CHECK
+        // ============================================================
+
         stage('Verify Selenium Target') {
             steps {
-                echo "Checking ${SELENIUM_BASE_URL} before Selenium..."
+                echo "Checking ${SELENIUM_BASE_URL}..."
 
                 bat '''
                     curl.exe -f --max-time 20 "%SELENIUM_BASE_URL%"
@@ -662,9 +782,13 @@ pipeline {
             }
         }
 
-        stage('Selenium Integration Tests') {
+        // ============================================================
+        // SELENIUM TESTS
+        // ============================================================
+
+        stage('Selenium Tests') {
             steps {
-                echo 'Running Week 10 Selenium integration tests...'
+                echo 'Running Selenium integration tests...'
 
                 bat '''
                     if not exist test-results mkdir test-results
@@ -678,6 +802,7 @@ pipeline {
 
             post {
                 always {
+
                     junit(
                         testResults: 'test-results/selenium-results.xml',
                         allowEmptyResults: true
@@ -697,21 +822,27 @@ pipeline {
     // ================================================================
 
     post {
-        success {
-            echo 'Jenkins Week 10 CI/CD pipeline completed successfully.'
 
-            echo(
-                'Build, unit tests, deployment, Selenium integration tests, ' +
-                'artifact archiving, FastAPI verification, and Nginx verification ' +
-                'succeeded where applicable.'
-            )
+        success {
+            echo '''
+==========================================
+PIPELINE SUCCESSFUL
+==========================================
+Build, tests, deployment and verification
+completed successfully.
+==========================================
+'''
         }
 
         failure {
-            echo(
-                'Jenkins Week 10 pipeline failed. ' +
-                'Check the failed stage and console output.'
-            )
+            echo '''
+==========================================
+PIPELINE FAILED
+==========================================
+Check the failed Jenkins stage and
+console output for details.
+==========================================
+'''
         }
 
         always {
