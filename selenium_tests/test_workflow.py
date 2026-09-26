@@ -8,6 +8,7 @@ from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait, Select
+from selenium.common.exceptions import TimeoutException
 
 
 # Week 9 browser target.
@@ -446,7 +447,29 @@ class LeaveApprovalWorkflowTest(unittest.TestCase):
         return employee_username
 
     def _logout(self):
-        """Log out through the application UI."""
+        """Close any open modal, then log out through the application UI."""
+
+        # The Week 10 Super Admin audit verification opens a request-details
+        # modal. The modal backdrop intercepts clicks on the logout button,
+        # so always close an open modal before logging out.
+        try:
+            close_button = WebDriverWait(self.driver, 3).until(
+                EC.visibility_of_element_located(
+                    (By.CSS_SELECTOR, "#modalRoot .modal .close")
+                )
+            )
+            self.driver.execute_script(
+                "arguments[0].click();",
+                close_button,
+            )
+            WebDriverWait(self.driver, 5).until(
+                EC.invisibility_of_element_located(
+                    (By.CSS_SELECTOR, "#modalRoot .modal")
+                )
+            )
+        except TimeoutException:
+            # No modal is open; continue with logout.
+            pass
 
         self.wait.until(
             EC.element_to_be_clickable((By.ID, "logout"))
