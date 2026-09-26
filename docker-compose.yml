@@ -8,7 +8,11 @@ services:
       POSTGRES_USER: ${POSTGRES_USER:-postgres}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-leave_approval_db}"]
+      test:
+        [
+          "CMD-SHELL",
+          "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-leave_approval_db}"
+        ]
       interval: 5s
       timeout: 5s
       retries: 20
@@ -24,7 +28,7 @@ services:
     restart: unless-stopped
     environment:
       DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@db:5432/${POSTGRES_DB:-leave_approval_db}
-      SECRET_KEY: ${SECRET_KEY:-change-this-secret-key-to-at-least-32-bytes}
+      SECRET_KEY: ${SECRET_KEY:?SECRET_KEY must be set}
       UPLOAD_DIR: /app/uploads
     expose:
       - "8000"
@@ -33,6 +37,18 @@ services:
         condition: service_healthy
     volumes:
       - leaveflow_uploads:/app/uploads
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/', timeout=3)"
+        ]
+      interval: 10s
+      timeout: 5s
+      start_period: 20s
+      retries: 5
 
   nginx:
     image: nginx:1.27-alpine
