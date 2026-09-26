@@ -24,6 +24,10 @@ pipeline {
     options {
         timestamps()
         disableConcurrentBuilds()
+        timeout(
+            time: 30,
+            unit: 'MINUTES'
+        )
     }
 
     stages {
@@ -180,6 +184,14 @@ pipeline {
         }
 
         stage('Deploy') {
+
+            options {
+                timeout(
+                    time: 5,
+                    unit: 'MINUTES'
+                )
+            }
+
             steps {
                 powershell '''
                     $ErrorActionPreference = "Stop"
@@ -241,7 +253,9 @@ pipeline {
 
                     Write-Host "FastAPI application found: $appFile"
 
-                    $ciPython = Join-Path $env:WORKSPACE ".ci-venv\\Scripts\\python.exe"
+                    $ciPython = Join-Path `
+                        $env:WORKSPACE `
+                        ".ci-venv\\Scripts\\python.exe"
 
                     if (-not (Test-Path $ciPython)) {
                         throw "Jenkins Python environment not found: $ciPython"
@@ -253,7 +267,7 @@ pipeline {
 
                     if (Test-Path $pidFile) {
 
-                        $oldPidText = Get-Content $pidFile
+                        $oldPidText = Get-Content $pidFile -ErrorAction SilentlyContinue
 
                         if ($oldPidText -and $oldPidText.Trim() -ne "") {
 
@@ -271,6 +285,8 @@ pipeline {
                                     -Force `
                                     -ErrorAction Stop
 
+                                Start-Sleep -Seconds 1
+
                                 Write-Host "Previous FastAPI process stopped."
                             }
                             catch {
@@ -284,28 +300,72 @@ pipeline {
 
                     Write-Host "Starting FastAPI application..."
 
-                    $process = Start-Process `
-                        -FilePath $ciPython `
-                        -ArgumentList @(
-                            "-m",
-                            "uvicorn",
-                            "app.main:app",
-                            "--host",
-                            "127.0.0.1",
-                            "--port",
-                            "$port",
-                            "--proxy-headers"
-                        ) `
-                        -WorkingDirectory $releaseDir `
-                        -RedirectStandardOutput $stdout `
-                        -RedirectStandardError $stderr `
-                        -PassThru
+                    # Jenkins tracks spawned processes using JENKINS_NODE_COOKIE.
+                    # Change the cookie only while creating FastAPI so the
+                    # long-running Uvicorn process can survive the Pipeline step.
+                    $originalCookie = $env:JENKINS_NODE_COOKIE
+                    $env:JENKINS_NODE_COOKIE = "leaveflow-$($env:BUILD_TAG)-$($env:BUILD_NUMBER)"
+
+                    try {
+
+                        $process = Start-Process `
+                            -FilePath $ciPython `
+                            -ArgumentList @(
+                                "-m",
+                                "uvicorn",
+                                "app.main:app",
+                                "--host",
+                                "127.0.0.1",
+                                "--port",
+                                "$port",
+                                "--proxy-headers"
+                            ) `
+                            -WorkingDirectory $releaseDir `
+                            -RedirectStandardOutput $stdout `
+                            -RedirectStandardError $stderr `
+                            -WindowStyle Hidden `
+                            -PassThru
+                    }
+                    finally {
+
+                        # Restore Jenkins' original cookie for the Pipeline process.
+                        $env:JENKINS_NODE_COOKIE = $originalCookie
+                    }
+
+                    if (-not $process) {
+                        throw "FastAPI process could not be started."
+                    }
 
                     $process.Id | Set-Content $pidFile
 
                     Write-Host "FastAPI started with PID: $($process.Id)"
 
                     Start-Sleep -Seconds 3
+
+                    $process.Refresh()
+
+                    if ($process.HasExited) {
+
+                        Write-Host "FastAPI exited unexpectedly."
+
+                        Write-Host "=========================================="
+                        Write-Host "FastAPI STDOUT"
+                        Write-Host "=========================================="
+
+                        if (Test-Path $stdout) {
+                            Get-Content $stdout
+                        }
+
+                        Write-Host "=========================================="
+                        Write-Host "FastAPI STDERR"
+                        Write-Host "=========================================="
+
+                        if (Test-Path $stderr) {
+                            Get-Content $stderr
+                        }
+
+                        throw "FastAPI process exited before health verification."
+                    }
 
                     $healthUrl = "http://127.0.0.1:$port/openapi.json"
                     $healthy = $false
@@ -315,18 +375,24 @@ pipeline {
                     for ($i = 1; $i -le 15; $i++) {
 
                         try {
+
                             $response = Invoke-WebRequest `
                                 -Uri $healthUrl `
                                 -UseBasicParsing `
                                 -TimeoutSec 5
 
                             if ($response.StatusCode -eq 200) {
+
                                 $healthy = $true
+
                                 Write-Host "FastAPI health check successful."
+                                Write-Host "HTTP Status: $($response.StatusCode)"
+
                                 break
                             }
                         }
                         catch {
+
                             Write-Host "Waiting for FastAPI... attempt $i/15"
                         }
 
@@ -450,7 +516,8 @@ pipeline {
 
                     Write-Host "Nginx configuration test successful."
 
-                    $nginxProcesses = Get-Process nginx -ErrorAction SilentlyContinue
+                    $nginxProcesses = Get-Process nginx `
+                        -ErrorAction SilentlyContinue
 
                     if ($nginxProcesses) {
 
@@ -473,11 +540,13 @@ pipeline {
 
                         Start-Process `
                             -FilePath $nginxExe `
-                            -WorkingDirectory $nginxHome
+                            -WorkingDirectory $nginxHome `
+                            -WindowStyle Hidden
 
                         Start-Sleep -Seconds 3
 
-                        $nginxProcesses = Get-Process nginx -ErrorAction SilentlyContinue
+                        $nginxProcesses = Get-Process nginx `
+                            -ErrorAction SilentlyContinue
 
                         if (-not $nginxProcesses) {
                             throw "Nginx failed to start."
@@ -512,19 +581,24 @@ pipeline {
                     for ($i = 1; $i -le 10; $i++) {
 
                         try {
+
                             $response = Invoke-WebRequest `
                                 -Uri $url `
                                 -UseBasicParsing `
                                 -TimeoutSec 5
 
                             if ($response.StatusCode -eq 200) {
+
                                 $healthy = $true
+
                                 Write-Host "Nginx reverse proxy verification successful."
                                 Write-Host "HTTP Status: $($response.StatusCode)"
+
                                 break
                             }
                         }
                         catch {
+
                             Write-Host "Waiting for Nginx... attempt $i/10"
                         }
 
@@ -545,6 +619,7 @@ pipeline {
     }
 
     post {
+
         success {
             echo 'Jenkins Week 10 CI/CD pipeline completed successfully.'
             echo 'Build, tests, Gradle packaging, artifact archiving, FastAPI deployment, verification, and Nginx verification succeeded where applicable.'
