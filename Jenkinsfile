@@ -172,7 +172,7 @@ pipeline {
         // FASTAPI DEPLOYMENT
         //
         // Windows Task Scheduler owns the long-running FastAPI process.
-        // Jenkins only creates/starts the task and verifies HTTP health.
+        // Jenkins creates the task, starts it, and verifies HTTP health.
         // ============================================================
 
         stage('Deploy FastAPI') {
@@ -229,6 +229,10 @@ pipeline {
                     Write-Host "Release directory:"
                     Write-Host $releaseDir
 
+                    # ------------------------------------------------
+                    # Locate generated application artifact
+                    # ------------------------------------------------
+
                     $zip = Get-ChildItem "build\\dist\\*.zip" |
                         Sort-Object LastWriteTime -Descending |
                         Select-Object -First 1
@@ -253,6 +257,10 @@ pipeline {
 
                     Write-Host "FastAPI application found."
 
+                    # ------------------------------------------------
+                    # Jenkins Python environment
+                    # ------------------------------------------------
+
                     $ciPython = Join-Path `
                         $env:WORKSPACE `
                         ".ci-venv\\Scripts\\python.exe"
@@ -274,7 +282,7 @@ pipeline {
 
                     if ($existingTask) {
 
-                        Write-Host "Existing FastAPI task found. Stopping it..."
+                        Write-Host "Existing FastAPI task found."
 
                         try {
                             Stop-ScheduledTask `
@@ -282,7 +290,7 @@ pipeline {
                                 -ErrorAction SilentlyContinue
                         }
                         catch {
-                            Write-Host "Previous scheduled task was not running."
+                            Write-Host "Previous task was not running."
                         }
 
                         Start-Sleep -Seconds 2
@@ -296,7 +304,7 @@ pipeline {
                     }
 
                     # ------------------------------------------------
-                    # Clean any process currently using deployment port
+                    # Clean deployment port
                     # ------------------------------------------------
 
                     Write-Host "Checking port $port..."
@@ -329,15 +337,15 @@ pipeline {
                         }
 
                         Start-Sleep -Seconds 2
+                    }
 
-                        $stillListening = Get-NetTCPConnection `
-                            -LocalPort $port `
-                            -State Listen `
-                            -ErrorAction SilentlyContinue
+                    $stillListening = Get-NetTCPConnection `
+                        -LocalPort $port `
+                        -State Listen `
+                        -ErrorAction SilentlyContinue
 
-                        if ($stillListening) {
-                            throw "Port $port is still occupied after cleanup."
-                        }
+                    if ($stillListening) {
+                        throw "Port $port is still occupied after cleanup."
                     }
 
                     Write-Host "Port $port is available."
@@ -346,6 +354,10 @@ pipeline {
                     # Runtime secret
                     # ------------------------------------------------
 
+                    if ([string]::IsNullOrWhiteSpace($env:SECRET_KEY)) {
+                        throw "SECRET_KEY was not supplied by Jenkins credentials."
+                    }
+
                     $secretFile = Join-Path `
                         $releaseDir `
                         "runtime-secret.txt"
@@ -353,7 +365,13 @@ pipeline {
                     Set-Content `
                         -Path $secretFile `
                         -Value $env:SECRET_KEY `
-                        -Encoding UTF8
+                        -Encoding ASCII
+
+                    if (-not (Test-Path $secretFile)) {
+                        throw "Failed to create runtime secret file."
+                    }
+
+                    Write-Host "Runtime secret file created."
 
                     # ------------------------------------------------
                     # FastAPI logs
@@ -367,72 +385,110 @@ pipeline {
                         $releaseDir `
                         "uvicorn.err.log"
 
+                    $taskLog = Join-Path `
+                        $releaseDir `
+                        "task-launch.log"
+
+                    New-Item `
+                        -ItemType File `
+                        -Force `
+                        -Path $stdout | Out-Null
+
+                    New-Item `
+                        -ItemType File `
+                        -Force `
+                        -Path $stderr | Out-Null
+
+                    New-Item `
+                        -ItemType File `
+                        -Force `
+                        -Path $taskLog | Out-Null
+
                     # ------------------------------------------------
-                    # Create scheduled-task launcher
+                    # Create CMD launcher
                     # ------------------------------------------------
 
                     $launcher = Join-Path `
                         $releaseDir `
-                        "launch_fastapi.ps1"
+                        "launch_fastapi.cmd"
 
                     $launcherContent = @"
-`$ErrorActionPreference = "Stop"
+@echo off
+setlocal
 
-`$releaseDir = '$releaseDir'
-`$python = '$ciPython'
-`$secretFile = '$secretFile'
-`$stdout = '$stdout'
-`$stderr = '$stderr'
+echo ==========================================>>"$taskLog"
+echo LeaveFlow FastAPI launcher started>>"$taskLog"
+echo Date: %DATE% %TIME%>>"$taskLog"
+echo Release: $releaseDir>>"$taskLog"
+echo Python: $ciPython>>"$taskLog"
+echo ==========================================>>"$taskLog"
 
-Set-Location -Path `$releaseDir
+cd /d "$releaseDir"
 
-if (-not (Test-Path `$python)) {
-    throw "Python executable not found: `$python"
-}
+if not exist "$ciPython" (
+    echo ERROR: Python executable not found.>>"$taskLog"
+    exit /b 1
+)
 
-if (-not (Test-Path `$secretFile)) {
-    throw "Runtime secret file not found: `$secretFile"
-}
+if not exist "$appFile" (
+    echo ERROR: FastAPI application not found.>>"$taskLog"
+    exit /b 1
+)
 
-`$env:SECRET_KEY = (Get-Content -LiteralPath `$secretFile -Raw).Trim()
+if not exist "$secretFile" (
+    echo ERROR: Secret file not found.>>"$taskLog"
+    exit /b 1
+)
 
-`$env:PYTHONUNBUFFERED = "1"
+set /p SECRET_KEY=<"$secretFile"
+set PYTHONUNBUFFERED=1
 
-& `$python -m uvicorn app.main:app `
-    --host 127.0.0.1 `
-    --port $port `
-    --proxy-headers `
-    *> `$stdout
+echo Python executable exists.>>"$taskLog"
+echo FastAPI application exists.>>"$taskLog"
+echo Runtime secret loaded.>>"$taskLog"
+echo Starting Uvicorn...>>"$taskLog"
 
-if (`$LASTEXITCODE -ne 0) {
-    exit `$LASTEXITCODE
-}
+"$ciPython" -m uvicorn app.main:app --host 127.0.0.1 --port $port --proxy-headers >>"$stdout" 2>>"$stderr"
+
+set EXITCODE=%ERRORLEVEL%
+
+echo Uvicorn exited with code %EXITCODE%.>>"$taskLog"
+
+exit /b %EXITCODE%
 "@
 
                     Set-Content `
                         -Path $launcher `
                         -Value $launcherContent `
-                        -Encoding UTF8
+                        -Encoding ASCII
 
-                    Write-Host "FastAPI launcher created:"
+                    Write-Host "FastAPI CMD launcher created:"
                     Write-Host $launcher
 
-                    # ------------------------------------------------
-                    # Register Windows Scheduled Task
-                    # ------------------------------------------------
-
-                    $powershellExe = Join-Path `
-                        $env:WINDIR `
-                        "System32\\WindowsPowerShell\\v1.0\\powershell.exe"
-
-                    if (-not (Test-Path $powershellExe)) {
-                        throw "Windows PowerShell executable not found."
+                    if (-not (Test-Path $launcher)) {
+                        throw "FastAPI launcher was not created."
                     }
 
+                    Write-Host "Launcher verification successful."
+
+                    # ------------------------------------------------
+                    # Windows Scheduled Task
+                    # ------------------------------------------------
+
+                    $cmdExe = Join-Path `
+                        $env:WINDIR `
+                        "System32\\cmd.exe"
+
+                    if (-not (Test-Path $cmdExe)) {
+                        throw "Windows CMD executable not found: $cmdExe"
+                    }
+
+                    Write-Host "CMD executable:"
+                    Write-Host $cmdExe
+
                     $action = New-ScheduledTaskAction `
-                        -Execute $powershellExe `
-                        -Argument `
-                            "-NoProfile -ExecutionPolicy Bypass -File `"$launcher`""
+                        -Execute $cmdExe `
+                        -Argument "/d /c `"$launcher`""
 
                     $trigger = New-ScheduledTaskTrigger `
                         -Once `
@@ -463,7 +519,7 @@ if (`$LASTEXITCODE -ne 0) {
                     Write-Host "Scheduled Task registered successfully."
 
                     # ------------------------------------------------
-                    # Start task
+                    # Start Scheduled Task
                     # ------------------------------------------------
 
                     Write-Host "Starting FastAPI Scheduled Task..."
@@ -514,40 +570,89 @@ if (`$LASTEXITCODE -ne 0) {
                         Start-Sleep -Seconds 2
                     }
 
+                    # ------------------------------------------------
+                    # Diagnostics if FastAPI failed
+                    # ------------------------------------------------
+
                     if (-not $healthy) {
 
                         Write-Host "=========================================="
-                        Write-Host "FastAPI STDOUT"
+                        Write-Host "TASK LAUNCH LOG"
+                        Write-Host "=========================================="
+
+                        if (Test-Path $taskLog) {
+                            Get-Content -LiteralPath $taskLog
+                        }
+                        else {
+                            Write-Host "Task launch log was not created."
+                        }
+
+                        Write-Host "=========================================="
+                        Write-Host "FASTAPI STDOUT"
                         Write-Host "=========================================="
 
                         if (Test-Path $stdout) {
-                            Get-Content $stdout
+                            Get-Content -LiteralPath $stdout
+                        }
+                        else {
+                            Write-Host "FastAPI stdout log was not created."
                         }
 
                         Write-Host "=========================================="
-                        Write-Host "FastAPI STDERR"
+                        Write-Host "FASTAPI STDERR"
                         Write-Host "=========================================="
 
                         if (Test-Path $stderr) {
-                            Get-Content $stderr
+                            Get-Content -LiteralPath $stderr
+                        }
+                        else {
+                            Write-Host "FastAPI stderr log was not created."
                         }
 
-                        $taskInfo = `
-                            Get-ScheduledTaskInfo `
-                                -TaskName $taskName `
-                                -ErrorAction SilentlyContinue
+                        Write-Host "=========================================="
+                        Write-Host "SCHEDULED TASK INFO"
+                        Write-Host "=========================================="
+
+                        $taskInfo = Get-ScheduledTaskInfo `
+                            -TaskName $taskName `
+                            -ErrorAction SilentlyContinue
 
                         if ($taskInfo) {
 
-                            Write-Host "Scheduled Task Last Run Result:"
+                            Write-Host "Last Run Time:"
+                            Write-Host $taskInfo.LastRunTime
+
+                            Write-Host "Last Task Result:"
                             Write-Host $taskInfo.LastTaskResult
+
+                            Write-Host "Next Run Time:"
+                            Write-Host $taskInfo.NextRunTime
+                        }
+                        else {
+                            Write-Host "Scheduled Task information unavailable."
+                        }
+
+                        Write-Host "=========================================="
+                        Write-Host "PORT CHECK"
+                        Write-Host "=========================================="
+
+                        $portCheck = Get-NetTCPConnection `
+                            -LocalPort $port `
+                            -State Listen `
+                            -ErrorAction SilentlyContinue
+
+                        if ($portCheck) {
+                            $portCheck | Format-Table -AutoSize
+                        }
+                        else {
+                            Write-Host "Nothing is listening on port $port."
                         }
 
                         throw "FastAPI health check failed."
                     }
 
                     # ------------------------------------------------
-                    # Remove temporary secret after application startup
+                    # Remove temporary secret
                     # ------------------------------------------------
 
                     Remove-Item `
@@ -714,6 +819,10 @@ if (`$LASTEXITCODE -ne 0) {
             }
         }
 
+        // ============================================================
+        // NGINX VERIFICATION
+        // ============================================================
+
         stage('Nginx Verification') {
             when {
                 expression {
@@ -777,7 +886,7 @@ if (`$LASTEXITCODE -ne 0) {
         }
 
         // ============================================================
-        // SELENIUM
+        // SELENIUM CONFIGURATION
         // ============================================================
 
         stage('Configure Selenium Target') {
@@ -808,6 +917,10 @@ if (`$LASTEXITCODE -ne 0) {
             }
         }
 
+        // ============================================================
+        // SELENIUM TARGET VERIFICATION
+        // ============================================================
+
         stage('Verify Selenium Target') {
             steps {
                 echo "Checking ${SELENIUM_BASE_URL} before Selenium..."
@@ -817,6 +930,10 @@ if (`$LASTEXITCODE -ne 0) {
                 '''
             }
         }
+
+        // ============================================================
+        // SELENIUM WEEK 10 TESTS
+        // ============================================================
 
         stage('Selenium Integration Tests') {
             steps {
