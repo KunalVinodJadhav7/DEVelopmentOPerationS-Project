@@ -264,9 +264,9 @@ pipeline {
                     Write-Host "Runtime Python:"
                     Write-Host $ciPython
 
-                    # ------------------------------------------------
-                    # Stop and remove previous Scheduled Task
-                    # ------------------------------------------------
+                    // ------------------------------------------------
+                    // Stop and remove previous Scheduled Task
+                    // ------------------------------------------------
 
                     $existingTask = Get-ScheduledTask `
                         -TaskName $taskName `
@@ -274,8 +274,7 @@ pipeline {
 
                     if ($existingTask) {
 
-                        Write-Host `
-                            "Existing FastAPI task found. Stopping it..."
+                        Write-Host "Existing FastAPI task found. Stopping it..."
 
                         try {
                             Stop-ScheduledTask `
@@ -283,8 +282,7 @@ pipeline {
                                 -ErrorAction SilentlyContinue
                         }
                         catch {
-                            Write-Host `
-                                "Previous scheduled task was not running."
+                            Write-Host "Previous scheduled task was not running."
                         }
 
                         Start-Sleep -Seconds 2
@@ -297,9 +295,9 @@ pipeline {
                         Start-Sleep -Seconds 1
                     }
 
-                    # ------------------------------------------------
-                    # Clean any process currently using deployment port
-                    # ------------------------------------------------
+                    // ------------------------------------------------
+                    // Clean any process currently using deployment port
+                    // ------------------------------------------------
 
                     Write-Host "Checking port $port..."
 
@@ -313,8 +311,7 @@ pipeline {
                         $existingPid = $existingConnections |
                             Select-Object -First 1 -ExpandProperty OwningProcess
 
-                        Write-Host `
-                            "Port $port is currently owned by PID $existingPid"
+                        Write-Host "Port $port is currently owned by PID $existingPid"
 
                         $existingProcess = Get-Process `
                             -Id $existingPid `
@@ -339,16 +336,15 @@ pipeline {
                             -ErrorAction SilentlyContinue
 
                         if ($stillListening) {
-                            throw `
-                                "Port $port is still occupied after cleanup."
+                            throw "Port $port is still occupied after cleanup."
                         }
                     }
 
                     Write-Host "Port $port is available."
 
-                    # ------------------------------------------------
-                    # Runtime secret
-                    # ------------------------------------------------
+                    // ------------------------------------------------
+                    // Runtime secret
+                    // ------------------------------------------------
 
                     $secretFile = Join-Path `
                         $releaseDir `
@@ -359,9 +355,9 @@ pipeline {
                         -Value $env:SECRET_KEY `
                         -Encoding UTF8
 
-                    # ------------------------------------------------
-                    # FastAPI logs
-                    # ------------------------------------------------
+                    // ------------------------------------------------
+                    // FastAPI logs
+                    // ------------------------------------------------
 
                     $stdout = Join-Path `
                         $releaseDir `
@@ -371,9 +367,9 @@ pipeline {
                         $releaseDir `
                         "uvicorn.err.log"
 
-                    # ------------------------------------------------
-                    # Create scheduled-task launcher
-                    # ------------------------------------------------
+                    // ------------------------------------------------
+                    // Create scheduled-task launcher
+                    // ------------------------------------------------
 
                     $launcher = Join-Path `
                         $releaseDir `
@@ -421,17 +417,16 @@ if (`$LASTEXITCODE -ne 0) {
                     Write-Host "FastAPI launcher created:"
                     Write-Host $launcher
 
-                    # ------------------------------------------------
-                    # Register Windows Scheduled Task
-                    # ------------------------------------------------
+                    // ------------------------------------------------
+                    // Register Windows Scheduled Task
+                    // ------------------------------------------------
 
                     $powershellExe = Join-Path `
                         $env:WINDIR `
                         "System32\\WindowsPowerShell\\v1.0\\powershell.exe"
 
                     if (-not (Test-Path $powershellExe)) {
-                        throw `
-                            "Windows PowerShell executable not found."
+                        throw "Windows PowerShell executable not found."
                     }
 
                     $action = New-ScheduledTaskAction `
@@ -465,26 +460,24 @@ if (`$LASTEXITCODE -ne 0) {
                             "LeaveFlow FastAPI $envName deployment managed by Jenkins" `
                         -Force | Out-Null
 
-                    Write-Host `
-                        "Scheduled Task registered successfully."
+                    Write-Host "Scheduled Task registered successfully."
 
-                    # ------------------------------------------------
-                    # Start task
-                    # ------------------------------------------------
+                    // ------------------------------------------------
+                    // Start task
+                    // ------------------------------------------------
 
                     Write-Host "Starting FastAPI Scheduled Task..."
 
                     Start-ScheduledTask `
                         -TaskName $taskName
 
-                    Write-Host `
-                        "FastAPI task start command returned to Jenkins."
+                    Write-Host "FastAPI task start command returned to Jenkins."
 
                     Start-Sleep -Seconds 3
 
-                    # ------------------------------------------------
-                    # FastAPI health check
-                    # ------------------------------------------------
+                    // ------------------------------------------------
+                    // FastAPI health check
+                    // ------------------------------------------------
 
                     $healthUrl = `
                         "http://127.0.0.1:$port/openapi.json"
@@ -507,8 +500,7 @@ if (`$LASTEXITCODE -ne 0) {
 
                                 $healthy = $true
 
-                                Write-Host `
-                                    "FastAPI is healthy. HTTP 200"
+                                Write-Host "FastAPI is healthy. HTTP 200"
 
                                 break
                             }
@@ -547,27 +539,23 @@ if (`$LASTEXITCODE -ne 0) {
 
                         if ($taskInfo) {
 
-                            Write-Host `
-                                "Scheduled Task Last Run Result:"
-
-                            Write-Host `
-                                $taskInfo.LastTaskResult
+                            Write-Host "Scheduled Task Last Run Result:"
+                            Write-Host $taskInfo.LastTaskResult
                         }
 
                         throw "FastAPI health check failed."
                     }
 
-                    # ------------------------------------------------
-                    # Remove temporary secret after application startup
-                    # ------------------------------------------------
+                    // ------------------------------------------------
+                    // Remove temporary secret after application startup
+                    // ------------------------------------------------
 
                     Remove-Item `
                         -LiteralPath $secretFile `
                         -Force `
                         -ErrorAction SilentlyContinue
 
-                    Write-Host `
-                        "Temporary runtime secret removed."
+                    Write-Host "Temporary runtime secret removed."
 
                     Write-Host "=========================================="
                     Write-Host "FASTAPI DEPLOYMENT SUCCESSFUL"
@@ -614,11 +602,8 @@ if (`$LASTEXITCODE -ne 0) {
                         throw "FastAPI verification failed."
                     }
 
-                    Write-Host `
-                        "Application is responding successfully."
-
-                    Write-Host `
-                        "HTTP Status: $($response.StatusCode)"
+                    Write-Host "Application is responding successfully."
+                    Write-Host "HTTP Status: $($response.StatusCode)"
                 '''
             }
         }
@@ -658,13 +643,11 @@ if (`$LASTEXITCODE -ne 0) {
                     Write-Host "=========================================="
 
                     if (-not (Test-Path $nginxExe)) {
-                        throw `
-                            "Nginx executable not found: $nginxExe"
+                        throw "Nginx executable not found: $nginxExe"
                     }
 
                     if (-not (Test-Path $sourceConfig)) {
-                        throw `
-                            "Repository Nginx configuration not found: $sourceConfig"
+                        throw "Repository Nginx configuration not found: $sourceConfig"
                     }
 
                     Copy-Item `
@@ -672,11 +655,9 @@ if (`$LASTEXITCODE -ne 0) {
                         -Destination $targetConfig `
                         -Force
 
-                    Write-Host `
-                        "Nginx configuration copied."
+                    Write-Host "Nginx configuration copied."
 
-                    Write-Host `
-                        "Testing Nginx configuration..."
+                    Write-Host "Testing Nginx configuration..."
 
                     & $nginxExe `
                         -p "$nginxHome\\" `
@@ -684,12 +665,10 @@ if (`$LASTEXITCODE -ne 0) {
                         -t
 
                     if ($LASTEXITCODE -ne 0) {
-                        throw `
-                            "Nginx configuration test failed."
+                        throw "Nginx configuration test failed."
                     }
 
-                    Write-Host `
-                        "Nginx configuration test successful."
+                    Write-Host "Nginx configuration test successful."
 
                     $nginxProcesses = Get-Process `
                         nginx `
@@ -697,8 +676,7 @@ if (`$LASTEXITCODE -ne 0) {
 
                     if ($nginxProcesses) {
 
-                        Write-Host `
-                            "Nginx is already running. Reloading..."
+                        Write-Host "Nginx is already running. Reloading..."
 
                         & $nginxExe `
                             -p "$nginxHome\\" `
@@ -709,13 +687,11 @@ if (`$LASTEXITCODE -ne 0) {
                             throw "Nginx reload failed."
                         }
 
-                        Write-Host `
-                            "Nginx reload successful."
+                        Write-Host "Nginx reload successful."
                     }
                     else {
 
-                        Write-Host `
-                            "Nginx is not running. Starting Nginx..."
+                        Write-Host "Nginx is not running. Starting Nginx..."
 
                         Start-Process `
                             -FilePath $nginxExe `
@@ -732,8 +708,7 @@ if (`$LASTEXITCODE -ne 0) {
                             throw "Nginx failed to start."
                         }
 
-                        Write-Host `
-                            "Nginx started successfully."
+                        Write-Host "Nginx started successfully."
                     }
                 '''
             }
@@ -794,10 +769,8 @@ if (`$LASTEXITCODE -ne 0) {
                     }
 
                     Write-Host "=========================================="
-                    Write-Host `
-                        "NGINX + FASTAPI VERIFICATION SUCCESSFUL"
-                    Write-Host `
-                        "URL: http://localhost/openapi.json"
+                    Write-Host "NGINX + FASTAPI VERIFICATION SUCCESSFUL"
+                    Write-Host "URL: http://localhost/openapi.json"
                     Write-Host "=========================================="
                 '''
             }
@@ -819,8 +792,7 @@ if (`$LASTEXITCODE -ne 0) {
                         env.BASE_URL =
                             'http://localhost'
 
-                        echo
-                            'Selenium target: production through Nginx.'
+                        echo 'Selenium target: production through Nginx.'
                     }
                     else {
 
@@ -830,8 +802,7 @@ if (`$LASTEXITCODE -ne 0) {
                         env.BASE_URL =
                             'http://127.0.0.1:8001'
 
-                        echo
-                            'Selenium target: staging through FastAPI.'
+                        echo 'Selenium target: staging through FastAPI.'
                     }
                 }
             }
@@ -839,8 +810,7 @@ if (`$LASTEXITCODE -ne 0) {
 
         stage('Verify Selenium Target') {
             steps {
-                echo
-                    "Checking ${SELENIUM_BASE_URL} before Selenium..."
+                echo "Checking ${SELENIUM_BASE_URL} before Selenium..."
 
                 bat '''
                     curl.exe -f --max-time 20 "%SELENIUM_BASE_URL%"
@@ -886,8 +856,7 @@ if (`$LASTEXITCODE -ne 0) {
     post {
 
         success {
-            echo 
-                'Jenkins Week 10 CI/CD pipeline completed successfully.'
+            echo 'Jenkins Week 10 CI/CD pipeline completed successfully.'
 
             echo(
                 'Build, unit tests, Gradle packaging, artifact archiving, ' +
