@@ -264,9 +264,9 @@ pipeline {
                     Write-Host "Runtime Python:"
                     Write-Host $ciPython
 
-                    // ------------------------------------------------
-                    // Stop and remove previous Scheduled Task
-                    // ------------------------------------------------
+                    # ------------------------------------------------
+                    # Stop and remove previous Scheduled Task
+                    # ------------------------------------------------
 
                     $existingTask = Get-ScheduledTask `
                         -TaskName $taskName `
@@ -295,9 +295,9 @@ pipeline {
                         Start-Sleep -Seconds 1
                     }
 
-                    // ------------------------------------------------
-                    // Clean any process currently using deployment port
-                    // ------------------------------------------------
+                    # ------------------------------------------------
+                    # Clean any process currently using deployment port
+                    # ------------------------------------------------
 
                     Write-Host "Checking port $port..."
 
@@ -342,9 +342,9 @@ pipeline {
 
                     Write-Host "Port $port is available."
 
-                    // ------------------------------------------------
-                    // Runtime secret
-                    // ------------------------------------------------
+                    # ------------------------------------------------
+                    # Runtime secret
+                    # ------------------------------------------------
 
                     $secretFile = Join-Path `
                         $releaseDir `
@@ -355,9 +355,9 @@ pipeline {
                         -Value $env:SECRET_KEY `
                         -Encoding UTF8
 
-                    // ------------------------------------------------
-                    // FastAPI logs
-                    // ------------------------------------------------
+                    # ------------------------------------------------
+                    # FastAPI logs
+                    # ------------------------------------------------
 
                     $stdout = Join-Path `
                         $releaseDir `
@@ -367,9 +367,9 @@ pipeline {
                         $releaseDir `
                         "uvicorn.err.log"
 
-                    // ------------------------------------------------
-                    // Create scheduled-task launcher
-                    // ------------------------------------------------
+                    # ------------------------------------------------
+                    # Create scheduled-task launcher
+                    # ------------------------------------------------
 
                     $launcher = Join-Path `
                         $releaseDir `
@@ -417,9 +417,9 @@ if (`$LASTEXITCODE -ne 0) {
                     Write-Host "FastAPI launcher created:"
                     Write-Host $launcher
 
-                    // ------------------------------------------------
-                    // Register Windows Scheduled Task
-                    // ------------------------------------------------
+                    # ------------------------------------------------
+                    # Register Windows Scheduled Task
+                    # ------------------------------------------------
 
                     $powershellExe = Join-Path `
                         $env:WINDIR `
@@ -462,9 +462,9 @@ if (`$LASTEXITCODE -ne 0) {
 
                     Write-Host "Scheduled Task registered successfully."
 
-                    // ------------------------------------------------
-                    // Start task
-                    // ------------------------------------------------
+                    # ------------------------------------------------
+                    # Start task
+                    # ------------------------------------------------
 
                     Write-Host "Starting FastAPI Scheduled Task..."
 
@@ -475,9 +475,9 @@ if (`$LASTEXITCODE -ne 0) {
 
                     Start-Sleep -Seconds 3
 
-                    // ------------------------------------------------
-                    // FastAPI health check
-                    // ------------------------------------------------
+                    # ------------------------------------------------
+                    # FastAPI health check
+                    # ------------------------------------------------
 
                     $healthUrl = `
                         "http://127.0.0.1:$port/openapi.json"
@@ -546,9 +546,9 @@ if (`$LASTEXITCODE -ne 0) {
                         throw "FastAPI health check failed."
                     }
 
-                    // ------------------------------------------------
-                    // Remove temporary secret after application startup
-                    // ------------------------------------------------
+                    # ------------------------------------------------
+                    # Remove temporary secret after application startup
+                    # ------------------------------------------------
 
                     Remove-Item `
                         -LiteralPath $secretFile `
