@@ -2,7 +2,7 @@ FROM python:3.12-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    PORT=8002
+    PORT=8000
 
 WORKDIR /app
 
@@ -22,7 +22,7 @@ COPY templates ./templates
 COPY frontend ./frontend
 COPY sql ./sql
 
-# Copy project documentation/example environment file
+# Copy project documentation and example environment file
 COPY README.md IMPLEMENTATION_STEPS.md ./
 COPY .env.example ./
 
@@ -38,9 +38,9 @@ EXPOSE 8000
 # Container health check
 HEALTHCHECK --interval=10s \
             --timeout=5s \
-            --start-period=20s \
+            --start-period=30s \
             --retries=5 \
-            CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3).read()"
+            CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/openapi.json', timeout=3).read()"
 
-# Start FastAPI
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+# Start FastAPI using the Docker runtime secret
+CMD ["sh", "-c", "export SECRET_KEY=\"$(cat /run/secrets/leaveflow_secret_key)\" && exec uvicorn app.main:app --host 0.0.0.0 --port 8000"]
