@@ -1178,7 +1178,7 @@ exit /b %EXITCODE%
 
                 bat '''
                     if not exist test-results mkdir test-results
-                    if not exist selenium_tests\artifacts mkdir selenium_tests\artifacts
+                    if not exist selenium_tests\\artifacts mkdir selenium_tests\\artifacts
 
                     rem ------------------------------------------------
                     rem Pass both Selenium URL variables.
@@ -1202,9 +1202,9 @@ exit /b %EXITCODE%
 
                     set "PYTHONUNBUFFERED=1"
 
-                    .ci-venv\Scripts\python.exe -m pytest selenium_tests ^
+                    .ci-venv\\Scripts\\python.exe -m pytest selenium_tests ^
                         -v ^
-                        --junitxml=test-results\selenium-results.xml
+                        --junitxml=test-results\\selenium-results.xml
                 '''
             }
 
