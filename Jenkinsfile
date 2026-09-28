@@ -1060,7 +1060,7 @@ exit /b %EXITCODE%
                     Write-Host ""
                     Write-Host "Docker Compose plugin discovery:"
 
-                    $pluginPath = Join-Path $dockerConfig "cli-plugins\docker-compose.exe"
+                    $pluginPath = Join-Path (Join-Path $dockerConfig "cli-plugins") "docker-compose.exe"
 
                     Write-Host "Expected Compose plugin path: $pluginPath"
 
