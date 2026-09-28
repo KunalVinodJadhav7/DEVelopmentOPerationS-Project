@@ -23,6 +23,7 @@ pipeline {
         BASE_URL          = 'http://localhost'
         SECRET_KEY        = credentials('leaveflow-secret-key')
         DOCKER_BASE_URL   = 'http://localhost:8000'
+        DOCKER_EXE        = 'C:\\Users\\kphvj\\AppData\\Local\\Programs\\DockerDesktop\\resources\\bin\\docker.exe'
     }
 
     triggers {
@@ -1002,10 +1003,18 @@ exit /b %EXITCODE%
                 echo 'Verifying Docker Engine and Docker Compose access...'
 
                 bat '''
-                    where docker
-                    docker --version
-                    docker compose version
-                    docker info
+                    if not exist "%DOCKER_EXE%" (
+                        echo ERROR: Docker CLI not found at:
+                        echo %DOCKER_EXE%
+                        exit /b 1
+                    )
+
+                    echo Docker CLI:
+                    echo %DOCKER_EXE%
+
+                    "%DOCKER_EXE%" --version
+                    "%DOCKER_EXE%" compose version
+                    "%DOCKER_EXE%" info
                 '''
             }
         }
@@ -1024,51 +1033,51 @@ exit /b %EXITCODE%
                     echo ==========================================
                     echo Docker container status
                     echo ==========================================
-                    docker ps --filter "name=leaveflow-app" --filter "name=leaveflow-db" --filter "name=leaveflow-nginx"
+                    "%DOCKER_EXE%" ps --filter "name=leaveflow-app" --filter "name=leaveflow-db" --filter "name=leaveflow-nginx"
 
                     echo.
                     echo ==========================================
                     echo Docker image verification
                     echo ==========================================
-                    docker image inspect leave-approval-system:latest
+                    "%DOCKER_EXE%" image inspect leave-approval-system:latest
 
                     echo.
                     echo ==========================================
                     echo Application container health
                     echo ==========================================
-                    docker inspect leaveflow-app --format "{{.State.Status}}"
-                    docker inspect leaveflow-app --format "{{.State.Health.Status}}"
+                    "%DOCKER_EXE%" inspect leaveflow-app --format "{{.State.Status}}"
+                    "%DOCKER_EXE%" inspect leaveflow-app --format "{{.State.Health.Status}}"
 
                     echo.
                     echo ==========================================
                     echo Database container health
                     echo ==========================================
-                    docker inspect leaveflow-db --format "{{.State.Status}}"
-                    docker inspect leaveflow-db --format "{{.State.Health.Status}}"
+                    "%DOCKER_EXE%" inspect leaveflow-db --format "{{.State.Status}}"
+                    "%DOCKER_EXE%" inspect leaveflow-db --format "{{.State.Health.Status}}"
 
                     echo.
                     echo ==========================================
                     echo Nginx container status
                     echo ==========================================
-                    docker inspect leaveflow-nginx --format "{{.State.Status}}"
+                    "%DOCKER_EXE%" inspect leaveflow-nginx --format "{{.State.Status}}"
 
                     echo.
                     echo ==========================================
                     echo PostgreSQL readiness
                     echo ==========================================
-                    docker exec leaveflow-db pg_isready -U postgres -d leave_approval_db
+                    "%DOCKER_EXE%" exec leaveflow-db pg_isready -U postgres -d leave_approval_db
 
                     echo.
                     echo ==========================================
                     echo Upload volume verification
                     echo ==========================================
-                    docker inspect leaveflow-app --format "{{json .Mounts}}"
+                    "%DOCKER_EXE%" inspect leaveflow-app --format "{{json .Mounts}}"
 
                     echo.
                     echo ==========================================
                     echo Database volume verification
                     echo ==========================================
-                    docker inspect leaveflow-db --format "{{json .Mounts}}"
+                    "%DOCKER_EXE%" inspect leaveflow-db --format "{{json .Mounts}}"
 
                     echo.
                     echo ==========================================
@@ -1086,14 +1095,14 @@ exit /b %EXITCODE%
                     echo ==========================================
                     echo Nginx to FastAPI verification
                     echo ==========================================
-                    docker exec leaveflow-nginx wget -qO- http://app:8000/openapi.json > NUL
+                    "%DOCKER_EXE%" exec leaveflow-nginx wget -qO- http://app:8000/openapi.json > NUL
 
                     echo.
                     echo ==========================================
                     echo Docker upload persistence verification
                     echo ==========================================
-                    docker exec leaveflow-app sh -c "test -f /app/uploads/docker-test.txt"
-                    docker exec leaveflow-app sh -c "grep -Fx 'week11-upload-test' /app/uploads/docker-test.txt"
+                    "%DOCKER_EXE%" exec leaveflow-app sh -c "test -f /app/uploads/docker-test.txt"
+                    "%DOCKER_EXE%" exec leaveflow-app sh -c "grep -Fx 'week11-upload-test' /app/uploads/docker-test.txt"
 
                     echo.
                     echo ==========================================
