@@ -1116,21 +1116,39 @@ exit /b %EXITCODE%
         // SELENIUM CONFIGURATION
         // ============================================================
 
-        // ============================================================
-        // SELENIUM CONFIGURATION
-        // ============================================================
-
         stage('Configure Selenium Target') {
             steps {
                 script {
+
                     if (params.DEPLOY_MODE == 'docker') {
+
+                        env.SELENIUM_BASE_URL =
+                            "${env.DOCKER_BASE_URL}/dashboard"
+
+                        env.BASE_URL =
+                            env.DOCKER_BASE_URL
+
                         echo 'Selenium target: Docker Nginx -> FastAPI deployment.'
                     }
                     else if (params.DEPLOY_ENV == 'production') {
+
+                        env.SELENIUM_BASE_URL =
+                            'http://localhost/dashboard'
+
+                        env.BASE_URL =
+                            'http://localhost'
+
                         echo 'Selenium target: production through Windows Nginx.'
                     }
                     else {
-                        echo 'Selenium target: staging FastAPI.'
+
+                        env.SELENIUM_BASE_URL =
+                            'http://127.0.0.1:8001/dashboard'
+
+                        env.BASE_URL =
+                            'http://127.0.0.1:8001'
+
+                        echo 'Selenium target: staging through FastAPI.'
                     }
                 }
             }
@@ -1142,22 +1160,10 @@ exit /b %EXITCODE%
 
         stage('Verify Selenium Target') {
             steps {
+                echo "Checking ${SELENIUM_BASE_URL} before Selenium..."
+
                 bat '''
-                    echo ==========================================
-                    echo Selenium Target Verification
-                    echo ==========================================
-
-                    if "%DEPLOY_MODE%"=="docker" (
-                        set "TARGET_URL=%DOCKER_BASE_URL%/dashboard"
-                    ) else if "%DEPLOY_ENV%"=="production" (
-                        set "TARGET_URL=http://localhost/dashboard"
-                    ) else (
-                        set "TARGET_URL=http://127.0.0.1:8001/dashboard"
-                    )
-
-                    echo Target URL: %TARGET_URL%
-
-                    curl.exe -f --max-time 20 "%TARGET_URL%"
+                    curl.exe -f --max-time 20 "%SELENIUM_BASE_URL%"
                 '''
             }
         }
@@ -1172,28 +1178,39 @@ exit /b %EXITCODE%
 
                 bat '''
                     if not exist test-results mkdir test-results
-                    if not exist selenium_tests\\artifacts mkdir selenium_tests\\artifacts
+                    if not exist selenium_tests\artifacts mkdir selenium_tests\artifacts
 
+                    rem ------------------------------------------------
+                    rem Pass both Selenium URL variables.
+                    rem test_workflow.py reads BASE_URL, while the smoke
+                    rem tests use the base_url fixture from conftest.py,
+                    rem which reads SELENIUM_BASE_URL.
+                    rem ------------------------------------------------
                     if "%DEPLOY_MODE%"=="docker" (
                         set "BASE_URL=%DOCKER_BASE_URL%"
+                        set "SELENIUM_BASE_URL=%DOCKER_BASE_URL%/dashboard"
                     ) else if "%DEPLOY_ENV%"=="production" (
                         set "BASE_URL=http://localhost"
+                        set "SELENIUM_BASE_URL=http://localhost/dashboard"
                     ) else (
                         set "BASE_URL=http://127.0.0.1:8001"
+                        set "SELENIUM_BASE_URL=http://127.0.0.1:8001/dashboard"
                     )
 
                     echo Selenium BASE_URL: %BASE_URL%
+                    echo Selenium SELENIUM_BASE_URL: %SELENIUM_BASE_URL%
 
                     set "PYTHONUNBUFFERED=1"
 
-                    .ci-venv\\Scripts\\python.exe -m pytest selenium_tests ^
+                    .ci-venv\Scripts\python.exe -m pytest selenium_tests ^
                         -v ^
-                        --junitxml=test-results\\selenium-results.xml
+                        --junitxml=test-results\selenium-results.xml
                 '''
             }
 
             post {
                 always {
+
                     junit(
                         testResults: 'test-results/selenium-results.xml',
                         allowEmptyResults: true
@@ -1206,6 +1223,7 @@ exit /b %EXITCODE%
                 }
             }
         }
+
     }
 
     // ================================================================
