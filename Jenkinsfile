@@ -1050,31 +1050,36 @@ exit /b %EXITCODE%
                     }
 
                     # ------------------------------------------------
-                    # Discover the installed Compose CLI plugin rather
-                    # than assuming one hard-coded plugin directory.
+                    # Verify the Compose CLI plugin directly. Docker
+                    # Desktop installed the Compose plugin under the
+                    # configured Docker CLI plugin directory. Avoid
+                    # docker info --format here because PowerShell can
+                    # interfere with the Go template quoting.
                     # ------------------------------------------------
 
                     Write-Host ""
                     Write-Host "Docker Compose plugin discovery:"
 
-                    $pluginPath = (& $dockerExe info --format '{{range .ClientInfo.Plugins}}{{if eq .Name "compose"}}{{.Path}}{{end}}{{end}}').Trim()
+                    $pluginPath = Join-Path $dockerConfig "cli-plugins\docker-compose.exe"
 
-                    if ($LASTEXITCODE -ne 0) {
-                        throw "Unable to query Docker CLI plugin information."
-                    }
-
-                    if ([string]::IsNullOrWhiteSpace($pluginPath)) {
-                        throw "Docker Compose CLI plugin was not found by Docker."
-                    }
-
-                    Write-Host "Compose plugin path: $pluginPath"
+                    Write-Host "Expected Compose plugin path: $pluginPath"
 
                     if (-not (Test-Path $pluginPath)) {
-                        throw "Docker Compose plugin path does not exist: $pluginPath"
+                        throw "Docker Compose CLI plugin was not found: $pluginPath"
+                    }
+
+                    Write-Host "Compose plugin file exists."
+
+                    Write-Host ""
+                    Write-Host "Docker Compose plugin version:"
+                    & $pluginPath version
+
+                    if ($LASTEXITCODE -ne 0) {
+                        throw "Docker Compose plugin executable check failed."
                     }
 
                     Write-Host ""
-                    Write-Host "Docker Compose version:"
+                    Write-Host "Docker Compose command version:"
                     & $dockerExe compose version
 
                     if ($LASTEXITCODE -ne 0) {
