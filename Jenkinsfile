@@ -1116,39 +1116,21 @@ exit /b %EXITCODE%
         // SELENIUM CONFIGURATION
         // ============================================================
 
+        // ============================================================
+        // SELENIUM CONFIGURATION
+        // ============================================================
+
         stage('Configure Selenium Target') {
             steps {
                 script {
-
                     if (params.DEPLOY_MODE == 'docker') {
-
-                        env.SELENIUM_BASE_URL =
-                            "${env.DOCKER_BASE_URL}/dashboard"
-
-                        env.BASE_URL =
-                            env.DOCKER_BASE_URL
-
                         echo 'Selenium target: Docker Nginx -> FastAPI deployment.'
                     }
                     else if (params.DEPLOY_ENV == 'production') {
-
-                        env.SELENIUM_BASE_URL =
-                            'http://localhost/dashboard'
-
-                        env.BASE_URL =
-                            'http://localhost'
-
                         echo 'Selenium target: production through Windows Nginx.'
                     }
                     else {
-
-                        env.SELENIUM_BASE_URL =
-                            'http://127.0.0.1:8001/dashboard'
-
-                        env.BASE_URL =
-                            'http://127.0.0.1:8001'
-
-                        echo 'Selenium target: staging through FastAPI.'
+                        echo 'Selenium target: staging FastAPI.'
                     }
                 }
             }
@@ -1160,10 +1142,22 @@ exit /b %EXITCODE%
 
         stage('Verify Selenium Target') {
             steps {
-                echo "Checking ${SELENIUM_BASE_URL} before Selenium..."
-
                 bat '''
-                    curl.exe -f --max-time 20 "%SELENIUM_BASE_URL%"
+                    echo ==========================================
+                    echo Selenium Target Verification
+                    echo ==========================================
+
+                    if "%DEPLOY_MODE%"=="docker" (
+                        set "TARGET_URL=%DOCKER_BASE_URL%/dashboard"
+                    ) else if "%DEPLOY_ENV%"=="production" (
+                        set "TARGET_URL=http://localhost/dashboard"
+                    ) else (
+                        set "TARGET_URL=http://127.0.0.1:8001/dashboard"
+                    )
+
+                    echo Target URL: %TARGET_URL%
+
+                    curl.exe -f --max-time 20 "%TARGET_URL%"
                 '''
             }
         }
@@ -1180,6 +1174,18 @@ exit /b %EXITCODE%
                     if not exist test-results mkdir test-results
                     if not exist selenium_tests\\artifacts mkdir selenium_tests\\artifacts
 
+                    if "%DEPLOY_MODE%"=="docker" (
+                        set "BASE_URL=%DOCKER_BASE_URL%"
+                    ) else if "%DEPLOY_ENV%"=="production" (
+                        set "BASE_URL=http://localhost"
+                    ) else (
+                        set "BASE_URL=http://127.0.0.1:8001"
+                    )
+
+                    echo Selenium BASE_URL: %BASE_URL%
+
+                    set "PYTHONUNBUFFERED=1"
+
                     .ci-venv\\Scripts\\python.exe -m pytest selenium_tests ^
                         -v ^
                         --junitxml=test-results\\selenium-results.xml
@@ -1188,7 +1194,6 @@ exit /b %EXITCODE%
 
             post {
                 always {
-
                     junit(
                         testResults: 'test-results/selenium-results.xml',
                         allowEmptyResults: true
