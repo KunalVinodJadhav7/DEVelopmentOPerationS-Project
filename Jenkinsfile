@@ -1233,10 +1233,24 @@ exit /b %EXITCODE%
 
         stage('Verify Selenium Target') {
             steps {
-                echo "Checking ${SELENIUM_BASE_URL} before Selenium..."
+                echo 'Verifying Selenium target...'
 
                 bat '''
-                    curl.exe -f --max-time 20 "%SELENIUM_BASE_URL%"
+                    echo ==========================================
+                    echo Selenium Target Verification
+                    echo ==========================================
+
+                    if "%DEPLOY_MODE%"=="docker" (
+                        set "TARGET_URL=http://localhost:8000/dashboard"
+                    ) else if "%DEPLOY_ENV%"=="production" (
+                        set "TARGET_URL=http://localhost/dashboard"
+                    ) else (
+                        set "TARGET_URL=http://127.0.0.1:8001/dashboard"
+                    )
+
+                    echo Target URL: %TARGET_URL%
+
+                    curl.exe -f --max-time 20 "%TARGET_URL%"
                 '''
             }
         }
