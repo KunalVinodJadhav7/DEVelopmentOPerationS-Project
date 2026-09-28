@@ -57,12 +57,85 @@ pipeline {
                     }
 
                     echo "Deployment environment: ${params.DEPLOY_ENV}"
+                    echo "Deployment mode: ${params.DEPLOY_MODE}"
                 }
             }
         }
 
         stage('Checkout') {
             steps {
+                powershell '''
+                    $ErrorActionPreference = "SilentlyContinue"
+
+                    Write-Host "=========================================="
+                    Write-Host "Cleaning previous Jenkins-owned FastAPI processes"
+                    Write-Host "=========================================="
+
+                    # ------------------------------------------------
+                    # Stop legacy Windows Scheduled Tasks first.
+                    # The legacy deployment uses the Jenkins workspace
+                    # .ci-venv. If Uvicorn is still running from that
+                    # environment, Windows locks native .pyd files and
+                    # deleteDir() cannot clean the workspace.
+                    # ------------------------------------------------
+
+                    $taskNames = @(
+                        "LeaveFlow-FastAPI-staging",
+                        "LeaveFlow-FastAPI-production"
+                    )
+
+                    foreach ($taskName in $taskNames) {
+
+                        $task = Get-ScheduledTask `
+                            -TaskName $taskName `
+                            -ErrorAction SilentlyContinue
+
+                        if ($task) {
+                            Write-Host "Stopping scheduled task: $taskName"
+
+                            Stop-ScheduledTask `
+                                -TaskName $taskName `
+                                -ErrorAction SilentlyContinue
+
+                            Start-Sleep -Seconds 2
+
+                            Unregister-ScheduledTask `
+                                -TaskName $taskName `
+                                -Confirm:$false `
+                                -ErrorAction SilentlyContinue
+                        }
+                    }
+
+                    # ------------------------------------------------
+                    # Kill any leftover process whose command line
+                    # still references this Jenkins workspace/.ci-venv.
+                    # This targets only processes owned by this pipeline's
+                    # workspace rather than unrelated Python processes.
+                    # ------------------------------------------------
+
+                    $workspace = [System.IO.Path]::GetFullPath($env:WORKSPACE).TrimEnd('\')
+                    $workspaceNeedle = ($workspace + "\.ci-venv").ToLowerInvariant()
+
+                    $workspaceProcesses = Get-CimInstance Win32_Process `
+                        -ErrorAction SilentlyContinue |
+                        Where-Object {
+                            $_.CommandLine -and `
+                            $_.CommandLine.ToLowerInvariant().Contains($workspaceNeedle)
+                        }
+
+                    foreach ($processInfo in $workspaceProcesses) {
+
+                        Write-Host `
+                            "Stopping workspace-bound process PID $($processInfo.ProcessId): $($processInfo.Name)"
+
+                        & taskkill.exe /PID $processInfo.ProcessId /T /F | Out-Null
+                    }
+
+                    Start-Sleep -Seconds 2
+
+                    Write-Host "Workspace process cleanup completed."
+                '''
+
                 deleteDir()
 
                 echo 'Checking out Employee Leave Approval System...'
