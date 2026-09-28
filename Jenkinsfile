@@ -7,6 +7,12 @@ pipeline {
             choices: ['staging', 'production'],
             description: 'Deployment environment'
         )
+
+        choice(
+            name: 'DEPLOY_MODE',
+            choices: ['legacy', 'docker'],
+            description: 'Deployment target. Legacy uses Windows Task Scheduler/Nginx. Docker verifies and tests the Docker Compose deployment.'
+        )
     }
 
     environment {
@@ -16,6 +22,7 @@ pipeline {
         SELENIUM_BASE_URL = 'http://localhost/dashboard'
         BASE_URL          = 'http://localhost'
         SECRET_KEY        = credentials('leaveflow-secret-key')
+        DOCKER_BASE_URL   = 'http://localhost:8000'
     }
 
     triggers {
@@ -176,6 +183,12 @@ pipeline {
         // ============================================================
 
         stage('Deploy FastAPI') {
+            when {
+                expression {
+                    return params.DEPLOY_MODE == 'legacy'
+                }
+            }
+
             options {
                 timeout(
                     time: 3,
@@ -679,6 +692,12 @@ exit /b %EXITCODE%
         // ============================================================
 
         stage('Deployment Verification') {
+            when {
+                expression {
+                    return params.DEPLOY_MODE == 'legacy'
+                }
+            }
+
             steps {
                 powershell '''
                     $ErrorActionPreference = "Stop"
@@ -719,8 +738,13 @@ exit /b %EXITCODE%
 
         stage('Nginx Setup') {
             when {
-                expression {
-                    params.DEPLOY_ENV == 'production'
+                allOf {
+                    expression {
+                        params.DEPLOY_MODE == 'legacy'
+                    }
+                    expression {
+                        params.DEPLOY_ENV == 'production'
+                    }
                 }
             }
 
@@ -825,8 +849,13 @@ exit /b %EXITCODE%
 
         stage('Nginx Verification') {
             when {
-                expression {
-                    params.DEPLOY_ENV == 'production'
+                allOf {
+                    expression {
+                        params.DEPLOY_MODE == 'legacy'
+                    }
+                    expression {
+                        params.DEPLOY_ENV == 'production'
+                    }
                 }
             }
 
@@ -886,6 +915,122 @@ exit /b %EXITCODE%
         }
 
         // ============================================================
+        // DOCKER INTEGRATION
+        // ============================================================
+
+        stage('Docker Environment Verification') {
+            when {
+                expression {
+                    params.DEPLOY_MODE == 'docker'
+                }
+            }
+
+            steps {
+                echo 'Verifying Docker Engine and Docker Compose access...'
+
+                bat '''
+                    where docker
+                    docker --version
+                    docker compose version
+                    docker info
+                '''
+            }
+        }
+
+        stage('Docker Container Verification') {
+            when {
+                expression {
+                    params.DEPLOY_MODE == 'docker'
+                }
+            }
+
+            steps {
+                echo 'Verifying the Week 11 Docker deployment...'
+
+                bat '''
+                    echo ==========================================
+                    echo Docker container status
+                    echo ==========================================
+                    docker ps --filter "name=leaveflow-app" --filter "name=leaveflow-db" --filter "name=leaveflow-nginx"
+
+                    echo.
+                    echo ==========================================
+                    echo Docker image verification
+                    echo ==========================================
+                    docker image inspect leave-approval-system:latest
+
+                    echo.
+                    echo ==========================================
+                    echo Application container health
+                    echo ==========================================
+                    docker inspect leaveflow-app --format "{{.State.Status}}"
+                    docker inspect leaveflow-app --format "{{.State.Health.Status}}"
+
+                    echo.
+                    echo ==========================================
+                    echo Database container health
+                    echo ==========================================
+                    docker inspect leaveflow-db --format "{{.State.Status}}"
+                    docker inspect leaveflow-db --format "{{.State.Health.Status}}"
+
+                    echo.
+                    echo ==========================================
+                    echo Nginx container status
+                    echo ==========================================
+                    docker inspect leaveflow-nginx --format "{{.State.Status}}"
+
+                    echo.
+                    echo ==========================================
+                    echo PostgreSQL readiness
+                    echo ==========================================
+                    docker exec leaveflow-db pg_isready -U postgres -d leave_approval_db
+
+                    echo.
+                    echo ==========================================
+                    echo Upload volume verification
+                    echo ==========================================
+                    docker inspect leaveflow-app --format "{{json .Mounts}}"
+
+                    echo.
+                    echo ==========================================
+                    echo Database volume verification
+                    echo ==========================================
+                    docker inspect leaveflow-db --format "{{json .Mounts}}"
+
+                    echo.
+                    echo ==========================================
+                    echo Public Docker health
+                    echo ==========================================
+                    curl.exe -f --max-time 20 "%DOCKER_BASE_URL%/health"
+
+                    echo.
+                    echo ==========================================
+                    echo Public Docker OpenAPI verification
+                    echo ==========================================
+                    curl.exe -f --max-time 20 "%DOCKER_BASE_URL%/openapi.json" > NUL
+
+                    echo.
+                    echo ==========================================
+                    echo Nginx to FastAPI verification
+                    echo ==========================================
+                    docker exec leaveflow-nginx wget -qO- http://app:8000/openapi.json > NUL
+
+                    echo.
+                    echo ==========================================
+                    echo Docker upload persistence verification
+                    echo ==========================================
+                    docker exec leaveflow-app sh -c "test -f /app/uploads/docker-test.txt"
+                    docker exec leaveflow-app sh -c "grep -Fx 'week11-upload-test' /app/uploads/docker-test.txt"
+
+                    echo.
+                    echo ==========================================
+                    echo Docker verification successful
+                    echo ==========================================
+                '''
+            }
+        }
+
+        // ============================================================
         // SELENIUM CONFIGURATION
         // ============================================================
 
@@ -893,7 +1038,17 @@ exit /b %EXITCODE%
             steps {
                 script {
 
-                    if (params.DEPLOY_ENV == 'production') {
+                    if (params.DEPLOY_MODE == 'docker') {
+
+                        env.SELENIUM_BASE_URL =
+                            "${env.DOCKER_BASE_URL}/dashboard"
+
+                        env.BASE_URL =
+                            env.DOCKER_BASE_URL
+
+                        echo 'Selenium target: Docker Nginx -> FastAPI deployment.'
+                    }
+                    else if (params.DEPLOY_ENV == 'production') {
 
                         env.SELENIUM_BASE_URL =
                             'http://localhost/dashboard'
@@ -901,7 +1056,7 @@ exit /b %EXITCODE%
                         env.BASE_URL =
                             'http://localhost'
 
-                        echo 'Selenium target: production through Nginx.'
+                        echo 'Selenium target: production through Windows Nginx.'
                     }
                     else {
 
@@ -973,18 +1128,18 @@ exit /b %EXITCODE%
     post {
 
         success {
-            echo 'Jenkins Week 10 CI/CD pipeline completed successfully.'
+            echo 'Jenkins CI/CD pipeline completed successfully.'
 
             echo(
                 'Build, unit tests, Gradle packaging, artifact archiving, ' +
-                'FastAPI deployment, FastAPI verification, Nginx verification, ' +
-                'and Selenium integration tests succeeded where applicable.'
+                'legacy deployment or Docker verification, and Selenium integration ' +
+                'tests succeeded where applicable.'
             )
         }
 
         failure {
             echo(
-                'Jenkins Week 10 pipeline failed. ' +
+                'Jenkins pipeline failed. ' +
                 'Check the failed stage and console output.'
             )
         }
