@@ -24,6 +24,7 @@ pipeline {
         SECRET_KEY        = credentials('leaveflow-secret-key')
         DOCKER_BASE_URL   = 'http://localhost:8000'
         DOCKER_EXE        = 'C:\\Users\\kphvj\\AppData\\Local\\Programs\\DockerDesktop\\resources\\bin\\docker.exe'
+        DOCKER_CONFIG     = 'C:\\Users\\kphvj\\.docker'
     }
 
     triggers {
@@ -1002,19 +1003,86 @@ exit /b %EXITCODE%
             steps {
                 echo 'Verifying Docker Engine and Docker Compose access...'
 
-                bat '''
-                    if not exist "%DOCKER_EXE%" (
-                        echo ERROR: Docker CLI not found at:
-                        echo %DOCKER_EXE%
-                        exit /b 1
-                    )
+                powershell '''
+                    $ErrorActionPreference = "Stop"
 
-                    echo Docker CLI:
-                    echo %DOCKER_EXE%
+                    $dockerExe = $env:DOCKER_EXE
+                    $dockerConfig = $env:DOCKER_CONFIG
 
-                    "%DOCKER_EXE%" --version
-                    "%DOCKER_EXE%" compose version
-                    "%DOCKER_EXE%" info
+                    Write-Host "=========================================="
+                    Write-Host "Docker Environment Verification"
+                    Write-Host "=========================================="
+
+                    if (-not (Test-Path $dockerExe)) {
+                        throw "Docker CLI not found: $dockerExe"
+                    }
+
+                    if (-not (Test-Path $dockerConfig)) {
+                        throw "Docker config directory not found: $dockerConfig"
+                    }
+
+                    # Jenkins can run under a different environment than an
+                    # interactive PowerShell session. Explicitly set the
+                    # Docker CLI configuration directory so CLI plugins are
+                    # resolved from the intended user's Docker configuration.
+                    $env:DOCKER_CONFIG = $dockerConfig
+
+                    Write-Host "Docker CLI:"
+                    Write-Host $dockerExe
+
+                    Write-Host "Docker Config:"
+                    Write-Host $env:DOCKER_CONFIG
+
+                    Write-Host ""
+                    Write-Host "Docker version:"
+                    & $dockerExe --version
+
+                    if ($LASTEXITCODE -ne 0) {
+                        throw "Docker CLI version check failed."
+                    }
+
+                    Write-Host ""
+                    Write-Host "Docker Engine info:"
+                    & $dockerExe info
+
+                    if ($LASTEXITCODE -ne 0) {
+                        throw "Docker Engine is not accessible from Jenkins."
+                    }
+
+                    # ------------------------------------------------
+                    # Discover the installed Compose CLI plugin rather
+                    # than assuming one hard-coded plugin directory.
+                    # ------------------------------------------------
+
+                    Write-Host ""
+                    Write-Host "Docker Compose plugin discovery:"
+
+                    $pluginPath = (& $dockerExe info --format '{{range .ClientInfo.Plugins}}{{if eq .Name "compose"}}{{.Path}}{{end}}{{end}}').Trim()
+
+                    if ($LASTEXITCODE -ne 0) {
+                        throw "Unable to query Docker CLI plugin information."
+                    }
+
+                    if ([string]::IsNullOrWhiteSpace($pluginPath)) {
+                        throw "Docker Compose CLI plugin was not found by Docker."
+                    }
+
+                    Write-Host "Compose plugin path: $pluginPath"
+
+                    if (-not (Test-Path $pluginPath)) {
+                        throw "Docker Compose plugin path does not exist: $pluginPath"
+                    }
+
+                    Write-Host ""
+                    Write-Host "Docker Compose version:"
+                    & $dockerExe compose version
+
+                    if ($LASTEXITCODE -ne 0) {
+                        throw "Docker Compose command failed from Jenkins."
+                    }
+
+                    Write-Host ""
+                    Write-Host "Docker Engine and Docker Compose verification successful."
                 '''
             }
         }
@@ -1160,22 +1228,10 @@ exit /b %EXITCODE%
 
         stage('Verify Selenium Target') {
             steps {
+                echo "Checking ${SELENIUM_BASE_URL} before Selenium..."
+
                 bat '''
-                    echo ==========================================
-                    echo Selenium Target Verification
-                    echo ==========================================
-
-                    if "%DEPLOY_MODE%"=="docker" (
-                        set "TARGET_URL=%DOCKER_BASE_URL%/dashboard"
-                    ) else if "%DEPLOY_ENV%"=="production" (
-                        set "TARGET_URL=http://localhost/dashboard"
-                    ) else (
-                        set "TARGET_URL=http://127.0.0.1:8001/dashboard"
-                    )
-
-                    echo Target URL: %TARGET_URL%
-
-                    curl.exe -f --max-time 20 "%TARGET_URL%"
+                    curl.exe -f --max-time 20 "%SELENIUM_BASE_URL%"
                 '''
             }
         }
