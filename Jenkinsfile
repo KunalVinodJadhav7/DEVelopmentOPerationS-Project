@@ -113,8 +113,8 @@ pipeline {
                     # workspace rather than unrelated Python processes.
                     # ------------------------------------------------
 
-                    $workspace = [System.IO.Path]::GetFullPath($env:WORKSPACE).TrimEnd('\')
-                    $workspaceNeedle = ($workspace + "\.ci-venv").ToLowerInvariant()
+                    $workspace = [System.IO.Path]::GetFullPath($env:WORKSPACE).TrimEnd([char]92)
+                    $workspaceNeedle = (Join-Path $workspace '.ci-venv').ToLowerInvariant()
 
                     $workspaceProcesses = Get-CimInstance Win32_Process `
                         -ErrorAction SilentlyContinue |
