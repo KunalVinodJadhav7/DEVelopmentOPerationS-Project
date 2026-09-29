@@ -251,6 +251,100 @@ pipeline {
         }
 
         // ============================================================
+        // LEGACY MODE / DOCKER PORT CONFLICT PREVENTION
+        //
+        // Docker Nginx publishes host port 8000. Legacy production
+        // FastAPI also uses host port 8000, so the two deployment modes
+        // must not run at the same time.
+        //
+        // This stage runs only in legacy mode. It stops the Docker Compose
+        // deployment before the legacy FastAPI deployment checks port 8000.
+        // Docker volumes are intentionally preserved because `docker compose
+        // down` without `-v` does not remove named volumes.
+        // ============================================================
+
+        stage('Stop Docker Deployment for Legacy Mode') {
+            when {
+                expression {
+                    params.DEPLOY_MODE == 'legacy'
+                }
+            }
+
+            steps {
+                powershell '''
+                    $ErrorActionPreference = "Stop"
+
+                    $dockerExe = $env:DOCKER_EXE
+                    $dockerConfig = $env:DOCKER_CONFIG
+
+                    Write-Host "=========================================="
+                    Write-Host "Checking Docker deployment before legacy deployment"
+                    Write-Host "=========================================="
+
+                    if (-not (Test-Path $dockerExe)) {
+                        Write-Host "Docker CLI not found."
+                        Write-Host "Continuing with legacy deployment."
+                        exit 0
+                    }
+
+                    if (-not (Test-Path $dockerConfig)) {
+                        Write-Host "Docker config directory not found."
+                        Write-Host "Continuing with legacy deployment."
+                        exit 0
+                    }
+
+                    $env:DOCKER_CONFIG = $dockerConfig
+
+                    $dockerRunning = & $dockerExe ps `
+                        --filter "name=leaveflow-nginx" `
+                        --format "{{.Names}}" 2>$null
+
+                    if ($LASTEXITCODE -ne 0) {
+                        throw "Unable to query running Docker containers."
+                    }
+
+                    if ($dockerRunning -contains "leaveflow-nginx") {
+                        Write-Host "Docker Nginx is running."
+                        Write-Host "Stopping Docker Compose deployment to free host port 8000..."
+
+                        Push-Location $env:WORKSPACE
+                        try {
+                            & $dockerExe compose down --remove-orphans
+
+                            if ($LASTEXITCODE -ne 0) {
+                                throw "Docker Compose shutdown failed."
+                            }
+                        }
+                        finally {
+                            Pop-Location
+                        }
+
+                        Write-Host "Docker deployment stopped successfully."
+                    }
+                    else {
+                        Write-Host "Docker Nginx is not running."
+                        Write-Host "No Docker shutdown required."
+                    }
+
+                    Start-Sleep -Seconds 2
+
+                    $portCheck = Get-NetTCPConnection `
+                        -LocalPort 8000 `
+                        -State Listen `
+                        -ErrorAction SilentlyContinue
+
+                    if ($portCheck) {
+                        Write-Host "Port 8000 is still occupied:"
+                        $portCheck | Format-Table -AutoSize
+                        throw "Port 8000 is still occupied after Docker cleanup."
+                    }
+
+                    Write-Host "Port 8000 is available for legacy production deployment."
+                '''
+            }
+        }
+
+        // ============================================================
         // FASTAPI DEPLOYMENT
         //
         // Windows Task Scheduler owns the long-running FastAPI process.
