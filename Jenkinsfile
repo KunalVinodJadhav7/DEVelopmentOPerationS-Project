@@ -27,9 +27,9 @@ pipeline {
         DOCKER_CONFIG     = 'C:\\Users\\kphvj\\.docker'
 
         // Docker Desktop installs its credential helper beside docker.exe.
-        // Jenkins does not automatically inherit that directory in PATH, so
-        // docker-credential-desktop cannot be resolved during image pulls.
-        PATH+DOCKER       = 'C:\\Users\\kphvj\\AppData\\Local\\Programs\\DockerDesktop\\resources\\bin'
+        // Jenkins may not inherit that directory in PATH. Each Docker
+        // PowerShell step prepends this directory before invoking Docker.
+        DOCKER_BIN_DIR    = 'C:\\Users\\kphvj\\AppData\\Local\\Programs\\DockerDesktop\\resources\\bin'
     }
 
     triggers {
@@ -306,6 +306,12 @@ pipeline {
                     }
 
                     $env:DOCKER_CONFIG = $dockerConfig
+
+                    # Make Docker Desktop's credential helper available to this PowerShell process.
+                    $dockerBinDir = $env:DOCKER_BIN_DIR
+                    if (-not ($env:PATH -split ';' | Where-Object { $_ -eq $dockerBinDir })) {
+                        $env:PATH = "$dockerBinDir;$env:PATH"
+                    }
 
                     $dockerRunning = & $dockerExe ps `
                         --filter "name=leaveflow-nginx" `
@@ -1126,7 +1132,7 @@ exit /b %EXITCODE%
                     # beside docker.exe. The Jenkins service environment may
                     # not contain that directory in PATH even though the
                     # Docker CLI itself is reachable by absolute path.
-                    $dockerBinDir = Split-Path -Parent $dockerExe
+                    $dockerBinDir = $env:DOCKER_BIN_DIR
                     if (-not ($env:PATH -split ';' | Where-Object { $_ -eq $dockerBinDir })) {
                         $env:PATH = "$dockerBinDir;$env:PATH"
                     }
@@ -1200,6 +1206,7 @@ exit /b %EXITCODE%
                     $ErrorActionPreference = "Stop"
 
                     $dockerExe = $env:DOCKER_EXE
+                    $dockerBinDir = $env:DOCKER_BIN_DIR
                     $composeFile = Join-Path $env:WORKSPACE 'docker-compose.yml'
                     $secretDir = Join-Path $env:WORKSPACE 'secrets'
                     $secretFile = Join-Path $secretDir 'leaveflow_secret_key.txt'
@@ -1207,6 +1214,11 @@ exit /b %EXITCODE%
                     Write-Host "=========================================="
                     Write-Host "Docker Compose Deployment"
                     Write-Host "=========================================="
+
+                    # Docker Desktop's credential helper must be on PATH for image pulls/builds.
+                    if (-not ($env:PATH -split ';' | Where-Object { $_ -eq $dockerBinDir })) {
+                        $env:PATH = "$dockerBinDir;$env:PATH"
+                    }
 
                     if (-not (Test-Path $composeFile)) {
                         throw "docker-compose.yml not found: $composeFile"
@@ -1294,7 +1306,13 @@ exit /b %EXITCODE%
                     $ErrorActionPreference = "Stop"
 
                     $dockerExe = $env:DOCKER_EXE
+                    $dockerBinDir = $env:DOCKER_BIN_DIR
                     $composeFile = Join-Path $env:WORKSPACE 'docker-compose.yml'
+
+                    # Keep the credential helper available for all Docker commands in this step.
+                    if (-not ($env:PATH -split ';' | Where-Object { $_ -eq $dockerBinDir })) {
+                        $env:PATH = "$dockerBinDir;$env:PATH"
+                    }
 
                     function Invoke-DockerChecked {
                         param(
