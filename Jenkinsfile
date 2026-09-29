@@ -1201,7 +1201,7 @@ exit /b %EXITCODE%
                     $dockerExe = $env:DOCKER_EXE
                     $dockerBinDir = $env:DOCKER_BIN_DIR
                     $composeFile = Join-Path $env:WORKSPACE 'docker-compose.yml'
-                    $secretFile = Join-Path $env:WORKSPACE 'secrets\leaveflow_secret_key.txt'
+                    $secretFile = Join-Path (Join-Path $env:WORKSPACE 'secrets') 'leaveflow_secret_key.txt'
 
                     Write-Host "=========================================="
                     Write-Host "Fresh Docker Run Cleanup"
