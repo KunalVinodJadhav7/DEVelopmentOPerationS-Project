@@ -25,6 +25,11 @@ pipeline {
         DOCKER_BASE_URL   = 'http://localhost:8000'
         DOCKER_EXE        = 'C:\\Users\\kphvj\\AppData\\Local\\Programs\\DockerDesktop\\resources\\bin\\docker.exe'
         DOCKER_CONFIG     = 'C:\\Users\\kphvj\\.docker'
+
+        // Docker Desktop installs its credential helper beside docker.exe.
+        // Jenkins does not automatically inherit that directory in PATH, so
+        // docker-credential-desktop cannot be resolved during image pulls.
+        PATH+DOCKER       = 'C:\\Users\\kphvj\\AppData\\Local\\Programs\\DockerDesktop\\resources\\bin'
     }
 
     triggers {
@@ -1117,8 +1122,26 @@ exit /b %EXITCODE%
 
                     $env:DOCKER_CONFIG = $dockerConfig
 
+                    # Docker Desktop keeps docker-credential-desktop.exe
+                    # beside docker.exe. The Jenkins service environment may
+                    # not contain that directory in PATH even though the
+                    # Docker CLI itself is reachable by absolute path.
+                    $dockerBinDir = Split-Path -Parent $dockerExe
+                    if (-not ($env:PATH -split ';' | Where-Object { $_ -eq $dockerBinDir })) {
+                        $env:PATH = "$dockerBinDir;$env:PATH"
+                    }
+
+                    $credentialHelper = Get-Command `
+                        docker-credential-desktop.exe `
+                        -ErrorAction SilentlyContinue
+
+                    if (-not $credentialHelper) {
+                        throw "Docker credential helper not found on PATH: docker-credential-desktop.exe"
+                    }
+
                     Write-Host "Docker CLI: $dockerExe"
                     Write-Host "Docker Config: $env:DOCKER_CONFIG"
+                    Write-Host "Docker credential helper: $($credentialHelper.Source)"
 
                     & $dockerExe --version
                     if ($LASTEXITCODE -ne 0) {
