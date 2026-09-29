@@ -1185,6 +1185,86 @@ exit /b %EXITCODE%
         // DOCKER COMPOSE DEPLOYMENT
         // ============================================================
 
+        stage('Clean Docker Deployment State') {
+            when {
+                expression {
+                    params.DEPLOY_MODE == 'docker'
+                }
+            }
+
+            steps {
+                echo 'Resetting the previous Docker Compose deployment...'
+
+                powershell '''
+                    $ErrorActionPreference = "Stop"
+
+                    $dockerExe = $env:DOCKER_EXE
+                    $dockerBinDir = $env:DOCKER_BIN_DIR
+                    $composeFile = Join-Path $env:WORKSPACE 'docker-compose.yml'
+                    $secretFile = Join-Path $env:WORKSPACE 'secrets\leaveflow_secret_key.txt'
+
+                    Write-Host "=========================================="
+                    Write-Host "Fresh Docker Run Cleanup"
+                    Write-Host "=========================================="
+
+                    if (-not ($env:PATH -split ';' | Where-Object { $_ -eq $dockerBinDir })) {
+                        $env:PATH = "$dockerBinDir;$env:PATH"
+                    }
+
+                    if (-not (Test-Path $composeFile)) {
+                        throw "docker-compose.yml not found: $composeFile"
+                    }
+
+                    if ([string]::IsNullOrWhiteSpace($env:SECRET_KEY)) {
+                        throw "Jenkins credential leaveflow-secret-key is empty."
+                    }
+
+                    # Compose validates file-backed secrets while reading the
+                    # project, so create the runtime secret before running
+                    # the cleanup command on a completely fresh workspace.
+                    $secretDir = Split-Path -Parent $secretFile
+                    New-Item -ItemType Directory -Force -Path $secretDir | Out-Null
+                    $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+                    [System.IO.File]::WriteAllText(
+                        $secretFile,
+                        $env:SECRET_KEY,
+                        $utf8NoBom
+                    )
+
+                    # Stop and remove the entire previous Compose stack.
+                    # --volumes guarantees a new PostgreSQL data directory
+                    # and a new application upload volume on every run.
+                    & $dockerExe compose -f $composeFile down --volumes --remove-orphans
+                    if ($LASTEXITCODE -ne 0) {
+                        throw "Previous Docker Compose deployment cleanup failed."
+                    }
+
+                    # Remove the project-created images so this run builds
+                    # fresh application and PostgreSQL images instead of
+                    # reusing an older tagged image. Build cache remains
+                    # available unless the deployment step disables it.
+                    $images = @(
+                        'leave-approval-system:latest',
+                        'leaveflow-postgres:16-alpine-locales'
+                    )
+
+                    foreach ($image in $images) {
+                        & $dockerExe image inspect $image *> $null
+                        if ($LASTEXITCODE -eq 0) {
+                            Write-Host "Removing previous image: $image"
+                            & $dockerExe image rm -f $image
+                            if ($LASTEXITCODE -ne 0) {
+                                throw "Failed to remove previous Docker image: $image"
+                            }
+                        }
+                    }
+
+                    Write-Host "Runtime secret file prepared for the fresh Compose deployment."
+                    Write-Host "Previous Docker deployment state removed. Fresh run is ready."
+                '''
+            }
+        }
+
         stage('Deploy Docker Compose') {
             when {
                 expression {
@@ -1254,12 +1334,19 @@ exit /b %EXITCODE%
                         throw "Docker Compose configuration validation failed."
                     }
 
-                    & $dockerExe compose -f $composeFile up -d --build --remove-orphans
+                    # Build the application and PostgreSQL images from scratch.
+                    & $dockerExe compose -f $composeFile build --no-cache
+                    if ($LASTEXITCODE -ne 0) {
+                        throw "Docker Compose image build failed."
+                    }
+
+                    # Create a completely new container set from the fresh images.
+                    & $dockerExe compose -f $composeFile up -d --remove-orphans --force-recreate
                     if ($LASTEXITCODE -ne 0) {
                         throw "Docker Compose deployment failed."
                     }
 
-                    Write-Host "Docker Compose services started."
+                    Write-Host "Fresh Docker Compose services started."
 
                     $healthy = $false
                     for ($i = 1; $i -le 30; $i++) {
