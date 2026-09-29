@@ -73,6 +73,9 @@ services:
     ports:
       - "8000:80"
 
+    # Use the static Nginx configuration directly.
+    # This bypasses the official image startup script that attempts
+    # to modify default.conf.
     entrypoint:
       - nginx
       - -g
