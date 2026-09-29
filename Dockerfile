@@ -26,7 +26,7 @@ COPY sql ./sql
 COPY README.md IMPLEMENTATION_STEPS.md ./
 COPY .env.example ./
 
-# Create persistent upload directory
+# Create persistent upload directory and set ownership
 RUN mkdir -p /app/uploads \
     && chown -R appuser:appuser /app
 
@@ -40,7 +40,7 @@ HEALTHCHECK --interval=10s \
             --timeout=5s \
             --start-period=30s \
             --retries=5 \
-            CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/openapi.json', timeout=3).read()"
+            CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/openapi.json', timeout=3).read()" || exit 1
 
 # Start FastAPI using the Docker runtime secret
 CMD ["sh", "-c", "export SECRET_KEY=\"$(cat /run/secrets/leaveflow_secret_key)\" && exec uvicorn app.main:app --host 0.0.0.0 --port 8000"]
