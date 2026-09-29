@@ -1249,13 +1249,21 @@ exit /b %EXITCODE%
                     )
 
                     foreach ($image in $images) {
-                        & $dockerExe image inspect $image *> $null
-                        if ($LASTEXITCODE -eq 0) {
+                        # docker image inspect returns exit code 1 when an image
+                        # does not exist. Do not invoke inspect here because a
+                        # native non-zero exit can be promoted to a Jenkins
+                        # PowerShell failure even when its output is redirected.
+                        $imageId = (& $dockerExe images -q $image 2>$null | Select-Object -First 1)
+
+                        if (-not [string]::IsNullOrWhiteSpace($imageId)) {
                             Write-Host "Removing previous image: $image"
                             & $dockerExe image rm -f $image
                             if ($LASTEXITCODE -ne 0) {
                                 throw "Failed to remove previous Docker image: $image"
                             }
+                        }
+                        else {
+                            Write-Host "Previous image not present: $image"
                         }
                     }
 
