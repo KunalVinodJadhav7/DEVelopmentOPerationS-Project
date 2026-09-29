@@ -251,6 +251,13 @@ pipeline {
         }
 
         // ============================================================
+        // FASTAPI DEPLOYMENT
+        //
+        // Windows Task Scheduler owns the long-running FastAPI process.
+        // Jenkins creates the task, starts it, and verifies HTTP health.
+        // ============================================================
+
+        // ============================================================
         // LEGACY MODE / DOCKER PORT CONFLICT PREVENTION
         //
         // Docker Nginx publishes host port 8000. Legacy production
@@ -343,13 +350,6 @@ pipeline {
                 '''
             }
         }
-
-        // ============================================================
-        // FASTAPI DEPLOYMENT
-        //
-        // Windows Task Scheduler owns the long-running FastAPI process.
-        // Jenkins creates the task, starts it, and verifies HTTP health.
-        // ============================================================
 
         stage('Deploy FastAPI') {
             when {
