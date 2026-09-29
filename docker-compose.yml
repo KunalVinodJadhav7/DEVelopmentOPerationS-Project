@@ -18,6 +18,7 @@ services:
       interval: 5s
       timeout: 5s
       retries: 20
+      start_period: 10s
 
     volumes:
       - leaveflow_db:/var/lib/postgresql/data
