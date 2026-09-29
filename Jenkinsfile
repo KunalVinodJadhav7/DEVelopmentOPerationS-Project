@@ -1115,73 +1115,144 @@ exit /b %EXITCODE%
                         throw "Docker config directory not found: $dockerConfig"
                     }
 
-                    # Jenkins can run under a different environment than an
-                    # interactive PowerShell session. Explicitly set the
-                    # Docker CLI configuration directory so CLI plugins are
-                    # resolved from the intended user's Docker configuration.
                     $env:DOCKER_CONFIG = $dockerConfig
 
-                    Write-Host "Docker CLI:"
-                    Write-Host $dockerExe
+                    Write-Host "Docker CLI: $dockerExe"
+                    Write-Host "Docker Config: $env:DOCKER_CONFIG"
 
-                    Write-Host "Docker Config:"
-                    Write-Host $env:DOCKER_CONFIG
-
-                    Write-Host ""
-                    Write-Host "Docker version:"
                     & $dockerExe --version
-
                     if ($LASTEXITCODE -ne 0) {
                         throw "Docker CLI version check failed."
                     }
 
-                    Write-Host ""
-                    Write-Host "Docker Engine info:"
                     & $dockerExe info
-
                     if ($LASTEXITCODE -ne 0) {
                         throw "Docker Engine is not accessible from Jenkins."
                     }
 
-                    # ------------------------------------------------
-                    # Verify the Compose CLI plugin directly. Docker
-                    # Desktop installed the Compose plugin under the
-                    # configured Docker CLI plugin directory. Avoid
-                    # docker info --format here because PowerShell can
-                    # interfere with the Go template quoting.
-                    # ------------------------------------------------
-
-                    Write-Host ""
-                    Write-Host "Docker Compose plugin discovery:"
-
                     $pluginPath = Join-Path (Join-Path $dockerConfig "cli-plugins") "docker-compose.exe"
-
-                    Write-Host "Expected Compose plugin path: $pluginPath"
 
                     if (-not (Test-Path $pluginPath)) {
                         throw "Docker Compose CLI plugin was not found: $pluginPath"
                     }
 
-                    Write-Host "Compose plugin file exists."
-
-                    Write-Host ""
-                    Write-Host "Docker Compose plugin version:"
+                    Write-Host "Compose plugin: $pluginPath"
                     & $pluginPath version
-
                     if ($LASTEXITCODE -ne 0) {
                         throw "Docker Compose plugin executable check failed."
                     }
 
-                    Write-Host ""
-                    Write-Host "Docker Compose command version:"
                     & $dockerExe compose version
-
                     if ($LASTEXITCODE -ne 0) {
                         throw "Docker Compose command failed from Jenkins."
                     }
 
-                    Write-Host ""
                     Write-Host "Docker Engine and Docker Compose verification successful."
+                '''
+            }
+        }
+
+        // ============================================================
+        // DOCKER COMPOSE DEPLOYMENT
+        // ============================================================
+
+        stage('Deploy Docker Compose') {
+            when {
+                expression {
+                    params.DEPLOY_MODE == 'docker'
+                }
+            }
+
+            options {
+                timeout(
+                    time: 10,
+                    unit: 'MINUTES'
+                )
+            }
+
+            steps {
+                echo 'Building and starting the Docker Compose deployment...'
+
+                powershell '''
+                    $ErrorActionPreference = "Stop"
+
+                    $dockerExe = $env:DOCKER_EXE
+                    $composeFile = Join-Path $env:WORKSPACE 'docker-compose.yml'
+                    $secretDir = Join-Path $env:WORKSPACE 'secrets'
+                    $secretFile = Join-Path $secretDir 'leaveflow_secret_key.txt'
+
+                    Write-Host "=========================================="
+                    Write-Host "Docker Compose Deployment"
+                    Write-Host "=========================================="
+
+                    if (-not (Test-Path $composeFile)) {
+                        throw "docker-compose.yml not found: $composeFile"
+                    }
+
+                    if ([string]::IsNullOrWhiteSpace($env:SECRET_KEY)) {
+                        throw "Jenkins credential leaveflow-secret-key is empty."
+                    }
+
+                    # docker-compose.yml uses a file-backed Compose secret.
+                    # Create it from the Jenkins credential without printing
+                    # the secret value to the console.
+                    New-Item -ItemType Directory -Force -Path $secretDir | Out-Null
+
+                    # Write the secret as UTF-8 without a BOM so the Linux
+                    # container receives exactly the credential value.
+                    $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+                    [System.IO.File]::WriteAllText(
+                        $secretFile,
+                        $env:SECRET_KEY,
+                        $utf8NoBom
+                    )
+
+                    if (-not (Test-Path $secretFile)) {
+                        throw "Docker secret file was not created."
+                    }
+
+                    Write-Host "Compose file: $composeFile"
+                    Write-Host "Runtime secret file created for Compose."
+
+                    & $dockerExe compose -f $composeFile config | Out-Null
+                    if ($LASTEXITCODE -ne 0) {
+                        throw "Docker Compose configuration validation failed."
+                    }
+
+                    & $dockerExe compose -f $composeFile up -d --build --remove-orphans
+                    if ($LASTEXITCODE -ne 0) {
+                        throw "Docker Compose deployment failed."
+                    }
+
+                    Write-Host "Docker Compose services started."
+
+                    $healthy = $false
+                    for ($i = 1; $i -le 30; $i++) {
+                        $appState = (& $dockerExe inspect leaveflow-app --format '{{.State.Status}}' 2>$null).Trim()
+                        $appHealth = (& $dockerExe inspect leaveflow-app --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' 2>$null).Trim()
+                        $dbState = (& $dockerExe inspect leaveflow-db --format '{{.State.Status}}' 2>$null).Trim()
+                        $dbHealth = (& $dockerExe inspect leaveflow-db --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' 2>$null).Trim()
+                        $nginxState = (& $dockerExe inspect leaveflow-nginx --format '{{.State.Status}}' 2>$null).Trim()
+
+                        Write-Host "Attempt $i/30 - app=$appState/$appHealth db=$dbState/$dbHealth nginx=$nginxState"
+
+                        if ($appState -eq 'running' -and $appHealth -eq 'healthy' -and
+                            $dbState -eq 'running' -and $dbHealth -eq 'healthy' -and
+                            $nginxState -eq 'running') {
+                            $healthy = $true
+                            break
+                        }
+
+                        Start-Sleep -Seconds 5
+                    }
+
+                    if (-not $healthy) {
+                        Write-Host "Docker Compose services did not reach the expected state."
+                        & $dockerExe compose -f $composeFile ps
+                        throw "Docker Compose deployment health verification failed."
+                    }
+
+                    Write-Host "Docker Compose deployment is running and healthy."
                 '''
             }
         }
@@ -1196,85 +1267,143 @@ exit /b %EXITCODE%
             steps {
                 echo 'Verifying the Week 11 Docker deployment...'
 
-                bat '''
-                    echo ==========================================
-                    echo Docker container status
-                    echo ==========================================
-                    "%DOCKER_EXE%" ps --filter "name=leaveflow-app" --filter "name=leaveflow-db" --filter "name=leaveflow-nginx"
+                powershell '''
+                    $ErrorActionPreference = "Stop"
 
-                    echo.
-                    echo ==========================================
-                    echo Docker image verification
-                    echo ==========================================
-                    "%DOCKER_EXE%" image inspect leave-approval-system:latest
+                    $dockerExe = $env:DOCKER_EXE
+                    $composeFile = Join-Path $env:WORKSPACE 'docker-compose.yml'
 
-                    echo.
-                    echo ==========================================
-                    echo Application container health
-                    echo ==========================================
-                    "%DOCKER_EXE%" inspect leaveflow-app --format "{{.State.Status}}"
-                    "%DOCKER_EXE%" inspect leaveflow-app --format "{{.State.Health.Status}}"
+                    function Invoke-DockerChecked {
+                        param(
+                            [Parameter(Mandatory=$true)]
+                            [string[]]$Arguments,
+                            [string]$FailureMessage = 'Docker command failed.'
+                        )
 
-                    echo.
-                    echo ==========================================
-                    echo Database container health
-                    echo ==========================================
-                    "%DOCKER_EXE%" inspect leaveflow-db --format "{{.State.Status}}"
-                    "%DOCKER_EXE%" inspect leaveflow-db --format "{{.State.Health.Status}}"
+                        & $dockerExe @Arguments
+                        if ($LASTEXITCODE -ne 0) {
+                            throw $FailureMessage
+                        }
+                    }
 
-                    echo.
-                    echo ==========================================
-                    echo Nginx container status
-                    echo ==========================================
-                    "%DOCKER_EXE%" inspect leaveflow-nginx --format "{{.State.Status}}"
+                    Write-Host "=========================================="
+                    Write-Host "Docker container status"
+                    Write-Host "=========================================="
+                    Invoke-DockerChecked @('compose','-f',$composeFile,'ps') 'docker compose ps failed.'
 
-                    echo.
-                    echo ==========================================
-                    echo PostgreSQL readiness
-                    echo ==========================================
-                    "%DOCKER_EXE%" exec leaveflow-db pg_isready -U postgres -d leave_approval_db
+                    Write-Host ""
+                    Write-Host "=========================================="
+                    Write-Host "Docker image verification"
+                    Write-Host "=========================================="
+                    Invoke-DockerChecked @('image','inspect','leave-approval-system:latest') 'Application image was not found.'
 
-                    echo.
-                    echo ==========================================
-                    echo Upload volume verification
-                    echo ==========================================
-                    "%DOCKER_EXE%" inspect leaveflow-app --format "{{json .Mounts}}"
+                    Write-Host ""
+                    Write-Host "=========================================="
+                    Write-Host "Application container health"
+                    Write-Host "=========================================="
+                    $appState = (& $dockerExe inspect leaveflow-app --format '{{.State.Status}}').Trim()
+                    $appHealth = (& $dockerExe inspect leaveflow-app --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}').Trim()
+                    if ($appState -ne 'running' -or $appHealth -ne 'healthy') {
+                        throw "leaveflow-app is not healthy: state=$appState health=$appHealth"
+                    }
+                    Write-Host "leaveflow-app state=$appState health=$appHealth"
 
-                    echo.
-                    echo ==========================================
-                    echo Database volume verification
-                    echo ==========================================
-                    "%DOCKER_EXE%" inspect leaveflow-db --format "{{json .Mounts}}"
+                    Write-Host ""
+                    Write-Host "=========================================="
+                    Write-Host "Database container health"
+                    Write-Host "=========================================="
+                    $dbState = (& $dockerExe inspect leaveflow-db --format '{{.State.Status}}').Trim()
+                    $dbHealth = (& $dockerExe inspect leaveflow-db --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}').Trim()
+                    if ($dbState -ne 'running' -or $dbHealth -ne 'healthy') {
+                        throw "leaveflow-db is not healthy: state=$dbState health=$dbHealth"
+                    }
+                    Write-Host "leaveflow-db state=$dbState health=$dbHealth"
 
-                    echo.
-                    echo ==========================================
-                    echo Public Docker health
-                    echo ==========================================
-                    curl.exe -f --max-time 20 "%DOCKER_BASE_URL%/health"
+                    Write-Host ""
+                    Write-Host "=========================================="
+                    Write-Host "Nginx container status"
+                    Write-Host "=========================================="
+                    $nginxState = (& $dockerExe inspect leaveflow-nginx --format '{{.State.Status}}').Trim()
+                    if ($nginxState -ne 'running') {
+                        throw "leaveflow-nginx is not running: state=$nginxState"
+                    }
+                    Write-Host "leaveflow-nginx state=$nginxState"
 
-                    echo.
-                    echo ==========================================
-                    echo Public Docker OpenAPI verification
-                    echo ==========================================
-                    curl.exe -f --max-time 20 "%DOCKER_BASE_URL%/openapi.json" > NUL
+                    Write-Host ""
+                    Write-Host "=========================================="
+                    Write-Host "PostgreSQL readiness"
+                    Write-Host "=========================================="
+                    Invoke-DockerChecked @('exec','leaveflow-db','pg_isready','-U','postgres','-d','leave_approval_db') 'PostgreSQL readiness check failed.'
 
-                    echo.
-                    echo ==========================================
-                    echo Nginx to FastAPI verification
-                    echo ==========================================
-                    "%DOCKER_EXE%" exec leaveflow-nginx wget -qO- http://app:8000/openapi.json > NUL
+                    Write-Host ""
+                    Write-Host "=========================================="
+                    Write-Host "Docker logs"
+                    Write-Host "=========================================="
+                    Invoke-DockerChecked @('logs','--tail','50','leaveflow-app') 'Application container logs could not be read.'
+                    Invoke-DockerChecked @('logs','--tail','50','leaveflow-db') 'Database container logs could not be read.'
+                    Invoke-DockerChecked @('logs','--tail','50','leaveflow-nginx') 'Nginx container logs could not be read.'
 
-                    echo.
-                    echo ==========================================
-                    echo Docker upload persistence verification
-                    echo ==========================================
-                    "%DOCKER_EXE%" exec leaveflow-app sh -c "test -f /app/uploads/docker-test.txt"
-                    "%DOCKER_EXE%" exec leaveflow-app sh -c "grep -Fx 'week11-upload-test' /app/uploads/docker-test.txt"
+                    Write-Host ""
+                    Write-Host "=========================================="
+                    Write-Host "Volume verification"
+                    Write-Host "=========================================="
+                    Invoke-DockerChecked @('inspect','leaveflow-app','--format','{{json .Mounts}}') 'Application volume verification failed.'
+                    Invoke-DockerChecked @('inspect','leaveflow-db','--format','{{json .Mounts}}') 'Database volume verification failed.'
 
-                    echo.
-                    echo ==========================================
-                    echo Docker verification successful
-                    echo ==========================================
+                    Write-Host ""
+                    Write-Host "=========================================="
+                    Write-Host "Public Docker health"
+                    Write-Host "=========================================="
+                    & curl.exe -f --max-time 20 "$env:DOCKER_BASE_URL/health"
+                    if ($LASTEXITCODE -ne 0) {
+                        throw "Public Docker health endpoint failed."
+                    }
+
+                    Write-Host ""
+                    Write-Host "=========================================="
+                    Write-Host "Public Docker OpenAPI verification"
+                    Write-Host "=========================================="
+                    & curl.exe -f --max-time 20 "$env:DOCKER_BASE_URL/openapi.json" | Out-Null
+                    if ($LASTEXITCODE -ne 0) {
+                        throw "Public Docker OpenAPI endpoint failed."
+                    }
+
+                    Write-Host ""
+                    Write-Host "=========================================="
+                    Write-Host "Nginx to FastAPI verification"
+                    Write-Host "=========================================="
+                    Invoke-DockerChecked @('exec','leaveflow-nginx','wget','-qO-','http://app:8000/openapi.json') 'Nginx to FastAPI verification failed.' | Out-Null
+
+                    Write-Host ""
+                    Write-Host "=========================================="
+                    Write-Host "Docker upload persistence verification"
+                    Write-Host "=========================================="
+                    Invoke-DockerChecked @('exec','leaveflow-app','sh','-c',"echo 'week11-upload-test' > /app/uploads/docker-test.txt") 'Unable to create Docker upload persistence marker.'
+                    Invoke-DockerChecked @('compose','-f',$composeFile,'up','-d','--force-recreate','app') 'Application container recreation failed.'
+
+                    $recreatedHealthy = $false
+                    for ($i = 1; $i -le 20; $i++) {
+                        $currentState = (& $dockerExe inspect leaveflow-app --format '{{.State.Status}}').Trim()
+                        $currentHealth = (& $dockerExe inspect leaveflow-app --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}').Trim()
+                        Write-Host "Recreate health attempt $i/20 - state=$currentState health=$currentHealth"
+
+                        if ($currentState -eq 'running' -and $currentHealth -eq 'healthy') {
+                            $recreatedHealthy = $true
+                            break
+                        }
+                        Start-Sleep -Seconds 3
+                    }
+
+                    if (-not $recreatedHealthy) {
+                        throw "Application did not become healthy after container recreation."
+                    }
+
+                    Invoke-DockerChecked @('exec','leaveflow-app','sh','-c',"grep -Fx 'week11-upload-test' /app/uploads/docker-test.txt") 'Docker upload-volume persistence verification failed.'
+
+                    Write-Host ""
+                    Write-Host "=========================================="
+                    Write-Host "Docker verification successful"
+                    Write-Host "=========================================="
                 '''
             }
         }
