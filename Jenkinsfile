@@ -1587,7 +1587,7 @@ exit /b %EXITCODE%
                     # builds and deploys the immutable Jenkins build tag.
                     Copy-Item -LiteralPath $composeFile -Destination $composeCiFile -Force
                     $composeContent = Get-Content -LiteralPath $composeCiFile -Raw
-                    $composeContent = $composeContent -replace '(?m)^\s*image:\s*leave-approval-system:latest\s*$', "    image: $releaseImage"
+                    $composeContent = $composeContent.Replace('image: leave-approval-system:latest', "image: $releaseImage")
                     Set-Content -LiteralPath $composeCiFile -Value $composeContent -Encoding UTF8
 
                     Write-Host "Week 12 Compose file: $composeCiFile"
