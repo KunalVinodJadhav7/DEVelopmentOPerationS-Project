@@ -312,7 +312,7 @@ Git Commit: ${commit}
 Docker Version: ${env.LEAVEFLOW_APP_IMAGE}
 Docker Latest Tag: ${env.LEAVEFLOW_APP_LATEST}
 Docker Registry Publishing: ${params.PUBLISH_DOCKER_IMAGE}
-""".trim() + System.lineSeparator()
+""".trim() + "\r\n"
 
                     writeFile(
                         file: 'build/docker-release-manifest.txt',
