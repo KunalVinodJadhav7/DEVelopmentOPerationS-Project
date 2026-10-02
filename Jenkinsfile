@@ -13,6 +13,25 @@ pipeline {
             choices: ['legacy', 'docker'],
             description: 'Deployment target. Legacy uses Windows Task Scheduler/Nginx. Docker verifies and tests the Docker Compose deployment.'
         )
+
+        booleanParam(
+            name: 'PUBLISH_DOCKER_IMAGE',
+            defaultValue: false,
+            description: 'Week 12: publish the versioned Docker image and latest tag to a container registry.'
+        )
+
+        string(
+            name: 'DOCKER_REGISTRY',
+            defaultValue: 'docker.io',
+            description: 'Container registry hostname used only when publishing is enabled.'
+        )
+
+        string(
+            name: 'DOCKERHUB_REPOSITORY',
+            defaultValue: '',
+            trim: true,
+            description: 'Repository path for publishing, for example username/employee-leave-approval-system. Required only when publishing is enabled.'
+        )
     }
 
     environment {
@@ -30,6 +49,11 @@ pipeline {
         // Jenkins may not inherit that directory in PATH. Each Docker
         // PowerShell step prepends this directory before invoking Docker.
         DOCKER_BIN_DIR    = 'C:\\Users\\kphvj\\AppData\\Local\\Programs\\DockerDesktop\\resources\\bin'
+
+        // Week 12 release metadata. Runtime values are overwritten from the Jenkins build number.
+        LEAVEFLOW_APP_IMAGE   = 'leave-approval-system:latest'
+        LEAVEFLOW_APP_VERSION = 'dev'
+        LEAVEFLOW_APP_LATEST  = 'leave-approval-system:latest'
     }
 
     triggers {
@@ -252,6 +276,57 @@ pipeline {
                     artifacts: 'build/dist/*.zip',
                     fingerprint: true
                 )
+            }
+        }
+
+        // ============================================================
+        // WEEK 12 - DOCKER RELEASE METADATA
+        // ============================================================
+
+        stage('Prepare Docker Release Metadata') {
+            when {
+                expression {
+                    params.DEPLOY_MODE == 'docker'
+                }
+            }
+
+            steps {
+                script {
+                    def releaseVersion = "1.0.${env.BUILD_NUMBER}"
+                    env.LEAVEFLOW_APP_VERSION = releaseVersion
+                    env.LEAVEFLOW_APP_IMAGE = "leave-approval-system:${releaseVersion}"
+                    env.LEAVEFLOW_APP_LATEST = 'leave-approval-system:latest'
+
+                    def commit = bat(
+                        script: '@git rev-parse --short HEAD',
+                        returnStdout: true
+                    ).trim()
+
+                    def manifest = """
+Week 12 Docker Release Manifest
+================================
+Application: Jenkins-Based Employee Leave Approval System
+Jenkins Build: ${env.BUILD_NUMBER}
+Deployment Environment: ${params.DEPLOY_ENV}
+Git Commit: ${commit}
+Docker Version: ${env.LEAVEFLOW_APP_IMAGE}
+Docker Latest Tag: ${env.LEAVEFLOW_APP_LATEST}
+Docker Registry Publishing: ${params.PUBLISH_DOCKER_IMAGE}
+""".trim() + System.lineSeparator()
+
+                    writeFile(
+                        file: 'build/docker-release-manifest.txt',
+                        text: manifest
+                    )
+
+                    echo "Week 12 release: ${env.LEAVEFLOW_APP_IMAGE}"
+                    echo "Source commit: ${commit}"
+
+                    archiveArtifacts(
+                        artifacts: 'build/docker-release-manifest.txt',
+                        fingerprint: true
+                    )
+                }
             }
         }
 
@@ -1244,9 +1319,10 @@ exit /b %EXITCODE%
                     # reusing an older tagged image. Build cache remains
                     # available unless the deployment step disables it.
                     $images = @(
-                        'leave-approval-system:latest',
+                        $env:LEAVEFLOW_APP_LATEST,
+                        $env:LEAVEFLOW_APP_IMAGE,
                         'leaveflow-postgres:16-alpine-locales'
-                    )
+                    ) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Select-Object -Unique
 
                     foreach ($image in $images) {
                         # docker image inspect returns exit code 1 when an image
@@ -1342,11 +1418,33 @@ exit /b %EXITCODE%
                         throw "Docker Compose configuration validation failed."
                     }
 
+                    # Week 12: deploy the immutable build-specific image rather
+                    # than the mutable :latest tag. Compose consumes these values
+                    # from the PowerShell process environment.
+                    if ([string]::IsNullOrWhiteSpace($env:LEAVEFLOW_APP_IMAGE)) {
+                        throw "Week 12 Docker image tag was not prepared."
+                    }
+
+                    if ([string]::IsNullOrWhiteSpace($env:LEAVEFLOW_APP_VERSION)) {
+                        throw "Week 12 Docker image version was not prepared."
+                    }
+
+                    Write-Host "Release image: $env:LEAVEFLOW_APP_IMAGE"
+                    Write-Host "Release version: $env:LEAVEFLOW_APP_VERSION"
+
                     # Build the application and PostgreSQL images from scratch.
                     & $dockerExe compose -f $composeFile build --no-cache
                     if ($LASTEXITCODE -ne 0) {
                         throw "Docker Compose image build failed."
                     }
+
+                    $builtImageId = (& $dockerExe images -q $env:LEAVEFLOW_APP_IMAGE 2>$null | Select-Object -First 1)
+                    if ([string]::IsNullOrWhiteSpace($builtImageId)) {
+                        throw "Versioned Docker image was not created: $env:LEAVEFLOW_APP_IMAGE"
+                    }
+
+                    Write-Host "Versioned Docker image created: $env:LEAVEFLOW_APP_IMAGE"
+                    Write-Host "Image ID: $builtImageId"
 
                     # Create a completely new container set from the fresh images.
                     & $dockerExe compose -f $composeFile up -d --remove-orphans --force-recreate
@@ -1354,7 +1452,7 @@ exit /b %EXITCODE%
                         throw "Docker Compose deployment failed."
                     }
 
-                    Write-Host "Fresh Docker Compose services started."
+                    Write-Host "Fresh Docker Compose services started with $env:LEAVEFLOW_APP_IMAGE."
 
                     $healthy = $false
                     for ($i = 1; $i -le 30; $i++) {
@@ -1383,6 +1481,15 @@ exit /b %EXITCODE%
                     }
 
                     Write-Host "Docker Compose deployment is running and healthy."
+
+                    # Update :latest only after the immutable release has
+                    # successfully passed the deployment health gate.
+                    & $dockerExe tag $env:LEAVEFLOW_APP_IMAGE $env:LEAVEFLOW_APP_LATEST
+                    if ($LASTEXITCODE -ne 0) {
+                        throw "Failed to update Docker latest tag."
+                    }
+
+                    Write-Host "Latest tag updated: $env:LEAVEFLOW_APP_LATEST -> $env:LEAVEFLOW_APP_IMAGE"
                 '''
             }
         }
@@ -1443,6 +1550,18 @@ exit /b %EXITCODE%
                         throw "leaveflow-app is not healthy: state=$appState health=$appHealth"
                     }
                     Write-Host "leaveflow-app state=$appState health=$appHealth"
+
+                    $deployedImage = (& $dockerExe inspect leaveflow-app --format '{{.Config.Image}}').Trim()
+                    if ($deployedImage -ne $env:LEAVEFLOW_APP_IMAGE) {
+                        throw "Docker deployment is not running the expected release image. Expected=$env:LEAVEFLOW_APP_IMAGE Actual=$deployedImage"
+                    }
+                    Write-Host "Deployed release image: $deployedImage"
+
+                    $imageVersion = (& $dockerExe image inspect $env:LEAVEFLOW_APP_IMAGE --format '{{index .Config.Labels "org.opencontainers.image.version"}}').Trim()
+                    if ($imageVersion -ne $env:LEAVEFLOW_APP_VERSION) {
+                        throw "Docker image version label mismatch. Expected=$env:LEAVEFLOW_APP_VERSION Actual=$imageVersion"
+                    }
+                    Write-Host "Docker image version label: $imageVersion"
 
                     Write-Host ""
                     Write-Host "=========================================="
@@ -1670,6 +1789,90 @@ exit /b %EXITCODE%
             }
         }
 
+        // ============================================================
+        // WEEK 12 - OPTIONAL CONTAINER REGISTRY PUBLISH
+        // ============================================================
+
+        stage('Publish Docker Image') {
+            when {
+                allOf {
+                    expression { params.DEPLOY_MODE == 'docker' }
+                    expression { params.PUBLISH_DOCKER_IMAGE }
+                }
+            }
+
+            steps {
+                script {
+                    if (!params.DOCKERHUB_REPOSITORY?.trim()) {
+                        error(
+                            'DOCKERHUB_REPOSITORY is required when PUBLISH_DOCKER_IMAGE is enabled. ' +
+                            'Example: username/employee-leave-approval-system'
+                        )
+                    }
+
+                    withCredentials([
+                        usernamePassword(
+                            credentialsId: 'dockerhub-credentials',
+                            usernameVariable: 'DOCKER_USERNAME',
+                            passwordVariable: 'DOCKER_PASSWORD'
+                        )
+                    ]) {
+                        powershell '''
+                            $ErrorActionPreference = "Stop"
+
+                            $dockerExe = $env:DOCKER_EXE
+                            $dockerBinDir = $env:DOCKER_BIN_DIR
+                            $registry = $env:DOCKER_REGISTRY.Trim()
+                            $repository = $env:DOCKERHUB_REPOSITORY.Trim()
+
+                            if (-not ($env:PATH -split ';' | Where-Object { $_ -eq $dockerBinDir })) {
+                                $env:PATH = "$dockerBinDir;$env:PATH"
+                            }
+
+                            $remoteVersion = "$registry/$repository`:$env:LEAVEFLOW_APP_VERSION"
+                            $remoteLatest = "$registry/$repository`:latest"
+
+                            Write-Host "Publishing release image: $remoteVersion"
+                            Write-Host "Publishing latest image: $remoteLatest"
+
+                            $env:DOCKER_PASSWORD | & $dockerExe login $registry --username $env:DOCKER_USERNAME --password-stdin
+                            if ($LASTEXITCODE -ne 0) {
+                                throw "Docker registry login failed."
+                            }
+
+                            try {
+                                & $dockerExe tag $env:LEAVEFLOW_APP_IMAGE $remoteVersion
+                                if ($LASTEXITCODE -ne 0) {
+                                    throw "Failed to tag Docker release image for publishing."
+                                }
+
+                                & $dockerExe tag $env:LEAVEFLOW_APP_IMAGE $remoteLatest
+                                if ($LASTEXITCODE -ne 0) {
+                                    throw "Failed to tag Docker latest image for publishing."
+                                }
+
+                                & $dockerExe push $remoteVersion
+                                if ($LASTEXITCODE -ne 0) {
+                                    throw "Failed to push versioned Docker image: $remoteVersion"
+                                }
+
+                                & $dockerExe push $remoteLatest
+                                if ($LASTEXITCODE -ne 0) {
+                                    throw "Failed to push Docker latest image: $remoteLatest"
+                                }
+
+                                Write-Host "Docker image publication successful."
+                            }
+                            finally {
+                                & $dockerExe logout $registry | Out-Null
+                            }
+                        '''
+                    }
+                }
+            }
+        }
+
+
     }
 
     // ================================================================
@@ -1683,8 +1886,8 @@ exit /b %EXITCODE%
 
             echo(
                 'Build, unit tests, Gradle packaging, artifact archiving, ' +
-                'legacy deployment or Docker verification, and Selenium integration ' +
-                'tests succeeded where applicable.'
+                'legacy deployment or Docker continuous deployment, versioned image ' +
+                'verification/publishing, and Selenium integration tests succeeded where applicable.'
             )
         }
 
