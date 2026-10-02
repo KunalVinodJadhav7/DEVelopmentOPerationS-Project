@@ -293,9 +293,8 @@ pipeline {
             steps {
                 script {
                     def releaseVersion = "1.0.${env.BUILD_NUMBER}"
-                    env.LEAVEFLOW_APP_VERSION = releaseVersion
-                    env.LEAVEFLOW_APP_IMAGE = "leave-approval-system:${releaseVersion}"
-                    env.LEAVEFLOW_APP_LATEST = 'leave-approval-system:latest'
+                    def releaseImage = "leave-approval-system:${releaseVersion}"
+                    def latestImage = 'leave-approval-system:latest'
 
                     def commit = bat(
                         script: '@git rev-parse --short HEAD',
@@ -309,8 +308,8 @@ Application: Jenkins-Based Employee Leave Approval System
 Jenkins Build: ${env.BUILD_NUMBER}
 Deployment Environment: ${params.DEPLOY_ENV}
 Git Commit: ${commit}
-Docker Version: ${env.LEAVEFLOW_APP_IMAGE}
-Docker Latest Tag: ${env.LEAVEFLOW_APP_LATEST}
+Docker Version: ${releaseImage}
+Docker Latest Tag: ${latestImage}
 Docker Registry Publishing: ${params.PUBLISH_DOCKER_IMAGE}
 """.trim() + "\r\n"
 
@@ -319,7 +318,7 @@ Docker Registry Publishing: ${params.PUBLISH_DOCKER_IMAGE}
                         text: manifest
                     )
 
-                    echo "Week 12 release: ${env.LEAVEFLOW_APP_IMAGE}"
+                    echo "Week 12 release: ${releaseImage}"
                     echo "Source commit: ${commit}"
 
                     archiveArtifacts(
@@ -1173,6 +1172,90 @@ exit /b %EXITCODE%
         // DOCKER INTEGRATION
         // ============================================================
 
+        stage('Ensure Docker Desktop Running') {
+            when {
+                expression {
+                    params.DEPLOY_MODE == 'docker'
+                }
+            }
+
+            steps {
+                echo 'Ensuring Docker Desktop and the Linux Docker Engine are available...'
+
+                powershell '''
+                    $ErrorActionPreference = "Stop"
+
+                    $dockerExe = $env:DOCKER_EXE
+                    $dockerBinDir = $env:DOCKER_BIN_DIR
+
+                    Write-Host "=========================================="
+                    Write-Host "Ensure Docker Desktop Running"
+                    Write-Host "=========================================="
+
+                    if (-not (Test-Path $dockerExe)) {
+                        throw "Docker CLI not found: $dockerExe"
+                    }
+
+                    if (-not ($env:PATH -split ';' | Where-Object { $_ -eq $dockerBinDir })) {
+                        $env:PATH = "$dockerBinDir;$env:PATH"
+                    }
+
+                    # Always use the Docker Desktop Linux engine expected by
+                    # the Week 11/12 Compose deployment.
+                    $currentContext = (& $dockerExe context show 2>$null).Trim()
+                    Write-Host "Current Docker context: $currentContext"
+
+                    if ($currentContext -ne 'desktop-linux') {
+                        Write-Host "Switching Docker context to desktop-linux..."
+                        & $dockerExe context use desktop-linux
+                        if ($LASTEXITCODE -ne 0) {
+                            throw "Unable to select Docker context desktop-linux."
+                        }
+                    }
+
+                    # First check whether the engine is already reachable.
+                    & $dockerExe info *> $null
+
+                    if ($LASTEXITCODE -eq 0) {
+                        Write-Host "Docker Engine is already running and reachable."
+                        exit 0
+                    }
+
+                    Write-Host "Docker Engine is not currently reachable."
+                    Write-Host "Attempting to start Docker Desktop..."
+
+                    # Docker Desktop's CLI plugin is preferred because it starts
+                    # Docker Desktop through its supported command interface.
+                    & $dockerExe desktop start
+                    if ($LASTEXITCODE -ne 0) {
+                        throw "Docker Desktop could not be started from the Jenkins runtime. Ensure Jenkins runs under the Windows user that owns the Docker Desktop installation."
+                    }
+
+                    $dockerReady = $false
+
+                    for ($i = 1; $i -le 60; $i++) {
+                        Start-Sleep -Seconds 5
+
+                        & $dockerExe info *> $null
+
+                        if ($LASTEXITCODE -eq 0) {
+                            $dockerReady = $true
+                            Write-Host "Docker Engine became available on attempt $i/60."
+                            break
+                        }
+
+                        Write-Host "Waiting for Docker Engine... attempt $i/60"
+                    }
+
+                    if (-not $dockerReady) {
+                        throw "Docker Desktop was started, but the Docker Linux Engine did not become available within 5 minutes."
+                    }
+
+                    Write-Host "Docker Desktop and Docker Engine are ready for Jenkins."
+                '''
+            }
+        }
+
         stage('Docker Environment Verification') {
             when {
                 expression {
@@ -1277,6 +1360,9 @@ exit /b %EXITCODE%
                     $dockerBinDir = $env:DOCKER_BIN_DIR
                     $composeFile = Join-Path $env:WORKSPACE 'docker-compose.yml'
                     $secretFile = Join-Path (Join-Path $env:WORKSPACE 'secrets') 'leaveflow_secret_key.txt'
+                    $releaseVersion = "1.0.$($env:BUILD_NUMBER)"
+                    $releaseImage = "leave-approval-system:$releaseVersion"
+                    $latestImage = 'leave-approval-system:latest'
 
                     Write-Host "=========================================="
                     Write-Host "Fresh Docker Run Cleanup"
@@ -1319,8 +1405,8 @@ exit /b %EXITCODE%
                     # reusing an older tagged image. Build cache remains
                     # available unless the deployment step disables it.
                     $images = @(
-                        $env:LEAVEFLOW_APP_LATEST,
-                        $env:LEAVEFLOW_APP_IMAGE,
+                        $latestImage,
+                        $releaseImage,
                         'leaveflow-postgres:16-alpine-locales'
                     ) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Select-Object -Unique
 
@@ -1374,6 +1460,15 @@ exit /b %EXITCODE%
                     $composeFile = Join-Path $env:WORKSPACE 'docker-compose.yml'
                     $secretDir = Join-Path $env:WORKSPACE 'secrets'
                     $secretFile = Join-Path $secretDir 'leaveflow_secret_key.txt'
+
+                    # Derive Week 12 release metadata directly from Jenkins BUILD_NUMBER.
+                    # Do not rely on a previous Groovy env assignment surviving stage boundaries.
+                    $releaseVersion = "1.0.$($env:BUILD_NUMBER)"
+                    $releaseImage = "leave-approval-system:$releaseVersion"
+                    $latestImage = 'leave-approval-system:latest'
+                    $env:LEAVEFLOW_APP_VERSION = $releaseVersion
+                    $env:LEAVEFLOW_APP_IMAGE = $releaseImage
+                    $env:LEAVEFLOW_APP_LATEST = $latestImage
 
                     Write-Host "=========================================="
                     Write-Host "Docker Compose Deployment"
@@ -1510,6 +1605,9 @@ exit /b %EXITCODE%
                     $dockerExe = $env:DOCKER_EXE
                     $dockerBinDir = $env:DOCKER_BIN_DIR
                     $composeFile = Join-Path $env:WORKSPACE 'docker-compose.yml'
+                    $expectedVersion = "1.0.$($env:BUILD_NUMBER)"
+                    $expectedImage = "leave-approval-system:$expectedVersion"
+                    $latestImage = 'leave-approval-system:latest'
 
                     # Keep the credential helper available for all Docker commands in this step.
                     if (-not ($env:PATH -split ';' | Where-Object { $_ -eq $dockerBinDir })) {
@@ -1538,7 +1636,7 @@ exit /b %EXITCODE%
                     Write-Host "=========================================="
                     Write-Host "Docker image verification"
                     Write-Host "=========================================="
-                    Invoke-DockerChecked @('image','inspect','leave-approval-system:latest') 'Application image was not found.'
+                    Invoke-DockerChecked @('image','inspect',$latestImage) 'Application latest image was not found.'
 
                     Write-Host ""
                     Write-Host "=========================================="
@@ -1552,14 +1650,15 @@ exit /b %EXITCODE%
                     Write-Host "leaveflow-app state=$appState health=$appHealth"
 
                     $deployedImage = (& $dockerExe inspect leaveflow-app --format '{{.Config.Image}}').Trim()
-                    if ($deployedImage -ne $env:LEAVEFLOW_APP_IMAGE) {
-                        throw "Docker deployment is not running the expected release image. Expected=$env:LEAVEFLOW_APP_IMAGE Actual=$deployedImage"
+                    if ($deployedImage -ne $expectedImage) {
+                        throw "Docker deployment is not running the expected release image. Expected=$expectedImage Actual=$deployedImage"
                     }
+                    Write-Host "Expected release image: $expectedImage"
                     Write-Host "Deployed release image: $deployedImage"
 
-                    $imageVersion = (& $dockerExe image inspect $env:LEAVEFLOW_APP_IMAGE --format '{{index .Config.Labels "org.opencontainers.image.version"}}').Trim()
-                    if ($imageVersion -ne $env:LEAVEFLOW_APP_VERSION) {
-                        throw "Docker image version label mismatch. Expected=$env:LEAVEFLOW_APP_VERSION Actual=$imageVersion"
+                    $imageVersion = (& $dockerExe image inspect $expectedImage --format '{{index .Config.Labels "org.opencontainers.image.version"}}').Trim()
+                    if ($imageVersion -ne $expectedVersion) {
+                        throw "Docker image version label mismatch. Expected=$expectedVersion Actual=$imageVersion"
                     }
                     Write-Host "Docker image version label: $imageVersion"
 
@@ -1824,12 +1923,14 @@ exit /b %EXITCODE%
                             $dockerBinDir = $env:DOCKER_BIN_DIR
                             $registry = $env:DOCKER_REGISTRY.Trim()
                             $repository = $env:DOCKERHUB_REPOSITORY.Trim()
+                            $releaseVersion = "1.0.$($env:BUILD_NUMBER)"
+                            $releaseImage = "leave-approval-system:$releaseVersion"
 
                             if (-not ($env:PATH -split ';' | Where-Object { $_ -eq $dockerBinDir })) {
                                 $env:PATH = "$dockerBinDir;$env:PATH"
                             }
 
-                            $remoteVersion = "$registry/$repository`:$env:LEAVEFLOW_APP_VERSION"
+                            $remoteVersion = "$registry/$repository`:$releaseVersion"
                             $remoteLatest = "$registry/$repository`:latest"
 
                             Write-Host "Publishing release image: $remoteVersion"
@@ -1841,12 +1942,12 @@ exit /b %EXITCODE%
                             }
 
                             try {
-                                & $dockerExe tag $env:LEAVEFLOW_APP_IMAGE $remoteVersion
+                                & $dockerExe tag $releaseImage $remoteVersion
                                 if ($LASTEXITCODE -ne 0) {
                                     throw "Failed to tag Docker release image for publishing."
                                 }
 
-                                & $dockerExe tag $env:LEAVEFLOW_APP_IMAGE $remoteLatest
+                                & $dockerExe tag $releaseImage $remoteLatest
                                 if ($LASTEXITCODE -ne 0) {
                                     throw "Failed to tag Docker latest image for publishing."
                                 }

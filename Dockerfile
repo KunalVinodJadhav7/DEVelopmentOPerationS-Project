@@ -4,8 +4,6 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PORT=8000
 
-# Build-time application version.
-# Compose can provide this through LEAVEFLOW_APP_VERSION.
 ARG APP_VERSION=dev
 
 LABEL org.opencontainers.image.title="Jenkins-Based Employee Leave Approval System" \
