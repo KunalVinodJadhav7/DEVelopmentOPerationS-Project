@@ -330,6 +330,48 @@ Docker Registry Publishing: ${params.PUBLISH_DOCKER_IMAGE}
         }
 
         // ============================================================
+        // WEEK 12 - DOCKER AGENT WORKSPACE
+        // ============================================================
+
+        stage('Prepare Docker Agent Workspace') {
+            when {
+                beforeAgent true
+                expression {
+                    params.DEPLOY_MODE == 'docker'
+                }
+            }
+
+            steps {
+                echo 'Stashing Docker deployment source for the Docker Desktop agent...'
+
+                stash(
+                    name: 'docker-deployment-source',
+                    includes: """
+                        Dockerfile,
+                        docker-compose.yml,
+                        .dockerignore,
+                        .env.example,
+                        README.md,
+                        IMPLEMENTATION_STEPS.md,
+                        requirements.txt,
+                        pytest.ini,
+                        build.gradle,
+                        gradle.properties,
+                        settings.gradle,
+                        app/**/*,
+                        templates/**/*,
+                        frontend/**/*,
+                        sql/**/*,
+                        docker/**/*,
+                        nginx/**/*,
+                        scripts/**/*
+                    """,
+                    useDefaultExcludes: false
+                )
+            }
+        }
+
+        // ============================================================
         // FASTAPI DEPLOYMENT
         //
         // Windows Task Scheduler owns the long-running FastAPI process.
@@ -1173,13 +1215,23 @@ exit /b %EXITCODE%
         // ============================================================
 
         stage('Ensure Docker Desktop Running') {
+            agent {
+                node {
+                    label 'docker-desktop'
+                    customWorkspace 'C:\\Jenkins\\docker-agent-workspace\\Leave-Approval-CI_CD'
+                }
+            }
             when {
+                beforeAgent true
                 expression {
                     params.DEPLOY_MODE == 'docker'
                 }
             }
 
             steps {
+                deleteDir()
+                unstash 'docker-deployment-source'
+
                 echo 'Ensuring Docker Desktop and the Linux Docker Engine are available...'
 
                 powershell '''
@@ -1228,7 +1280,7 @@ exit /b %EXITCODE%
                     # Docker Desktop through its supported command interface.
                     & $dockerExe desktop start
                     if ($LASTEXITCODE -ne 0) {
-                        throw "Docker Desktop could not be started from the Jenkins runtime. Ensure Jenkins runs under the Windows user that owns the Docker Desktop installation."
+                        throw "Docker Desktop could not be started from the Docker agent. Ensure the docker-desktop agent runs under the Windows user that owns the Docker Desktop installation."
                     }
 
                     $dockerReady = $false
@@ -1257,7 +1309,14 @@ exit /b %EXITCODE%
         }
 
         stage('Docker Environment Verification') {
+            agent {
+                node {
+                    label 'docker-desktop'
+                    customWorkspace 'C:\\Jenkins\\docker-agent-workspace\\Leave-Approval-CI_CD'
+                }
+            }
             when {
+                beforeAgent true
                 expression {
                     params.DEPLOY_MODE == 'docker'
                 }
@@ -1344,7 +1403,14 @@ exit /b %EXITCODE%
         // ============================================================
 
         stage('Clean Docker Deployment State') {
+            agent {
+                node {
+                    label 'docker-desktop'
+                    customWorkspace 'C:\\Jenkins\\docker-agent-workspace\\Leave-Approval-CI_CD'
+                }
+            }
             when {
+                beforeAgent true
                 expression {
                     params.DEPLOY_MODE == 'docker'
                 }
@@ -1436,7 +1502,14 @@ exit /b %EXITCODE%
         }
 
         stage('Deploy Docker Compose') {
+            agent {
+                node {
+                    label 'docker-desktop'
+                    customWorkspace 'C:\\Jenkins\\docker-agent-workspace\\Leave-Approval-CI_CD'
+                }
+            }
             when {
+                beforeAgent true
                 expression {
                     params.DEPLOY_MODE == 'docker'
                 }
@@ -1458,6 +1531,7 @@ exit /b %EXITCODE%
                     $dockerExe = $env:DOCKER_EXE
                     $dockerBinDir = $env:DOCKER_BIN_DIR
                     $composeFile = Join-Path $env:WORKSPACE 'docker-compose.yml'
+                    $composeCiFile = Join-Path $env:WORKSPACE 'docker-compose.week12.yml'
                     $secretDir = Join-Path $env:WORKSPACE 'secrets'
                     $secretFile = Join-Path $secretDir 'leaveflow_secret_key.txt'
 
@@ -1508,7 +1582,18 @@ exit /b %EXITCODE%
                     Write-Host "Compose file: $composeFile"
                     Write-Host "Runtime secret file created for Compose."
 
-                    & $dockerExe compose -f $composeFile config | Out-Null
+                    # Keep the Week 11 repository Compose file unchanged.
+                    # Week 12 creates a temporary Compose copy so the app service
+                    # builds and deploys the immutable Jenkins build tag.
+                    Copy-Item -LiteralPath $composeFile -Destination $composeCiFile -Force
+                    $composeContent = Get-Content -LiteralPath $composeCiFile -Raw
+                    $composeContent = $composeContent -replace '(?m)^\s*image:\s*leave-approval-system:latest\s*$', "    image: $releaseImage"
+                    Set-Content -LiteralPath $composeCiFile -Value $composeContent -Encoding UTF8
+
+                    Write-Host "Week 12 Compose file: $composeCiFile"
+                    Write-Host "Week 12 Compose application image: $releaseImage"
+
+                    & $dockerExe compose -f $composeCiFile config | Out-Null
                     if ($LASTEXITCODE -ne 0) {
                         throw "Docker Compose configuration validation failed."
                     }
@@ -1528,7 +1613,7 @@ exit /b %EXITCODE%
                     Write-Host "Release version: $env:LEAVEFLOW_APP_VERSION"
 
                     # Build the application and PostgreSQL images from scratch.
-                    & $dockerExe compose -f $composeFile build --no-cache
+                    & $dockerExe compose -f $composeCiFile build --no-cache
                     if ($LASTEXITCODE -ne 0) {
                         throw "Docker Compose image build failed."
                     }
@@ -1542,7 +1627,7 @@ exit /b %EXITCODE%
                     Write-Host "Image ID: $builtImageId"
 
                     # Create a completely new container set from the fresh images.
-                    & $dockerExe compose -f $composeFile up -d --remove-orphans --force-recreate
+                    & $dockerExe compose -f $composeCiFile up -d --remove-orphans --force-recreate
                     if ($LASTEXITCODE -ne 0) {
                         throw "Docker Compose deployment failed."
                     }
@@ -1590,21 +1675,28 @@ exit /b %EXITCODE%
         }
 
         stage('Docker Container Verification') {
+            agent {
+                node {
+                    label 'docker-desktop'
+                    customWorkspace 'C:\\Jenkins\\docker-agent-workspace\\Leave-Approval-CI_CD'
+                }
+            }
             when {
+                beforeAgent true
                 expression {
                     params.DEPLOY_MODE == 'docker'
                 }
             }
 
             steps {
-                echo 'Verifying the Week 11 Docker deployment...'
+                echo 'Verifying the Week 11/12 Docker deployment on the Docker Desktop agent...'
 
                 powershell '''
                     $ErrorActionPreference = "Stop"
 
                     $dockerExe = $env:DOCKER_EXE
                     $dockerBinDir = $env:DOCKER_BIN_DIR
-                    $composeFile = Join-Path $env:WORKSPACE 'docker-compose.yml'
+                    $composeFile = Join-Path $env:WORKSPACE 'docker-compose.week12.yml'
                     $expectedVersion = "1.0.$($env:BUILD_NUMBER)"
                     $expectedImage = "leave-approval-system:$expectedVersion"
                     $latestImage = 'leave-approval-system:latest'
@@ -1765,6 +1857,9 @@ exit /b %EXITCODE%
         // ============================================================
         // SELENIUM CONFIGURATION
         // ============================================================
+        // Selenium remains on the normal Jenkins executor. Docker containers
+        // are running on the docker-desktop agent on this same Windows host,
+        // so the existing localhost Docker URL remains valid.
 
         stage('Configure Selenium Target') {
             steps {
@@ -1893,7 +1988,14 @@ exit /b %EXITCODE%
         // ============================================================
 
         stage('Publish Docker Image') {
+            agent {
+                node {
+                    label 'docker-desktop'
+                    customWorkspace 'C:\\Jenkins\\docker-agent-workspace\\Leave-Approval-CI_CD'
+                }
+            }
             when {
+                beforeAgent true
                 allOf {
                     expression { params.DEPLOY_MODE == 'docker' }
                     expression { params.PUBLISH_DOCKER_IMAGE }
