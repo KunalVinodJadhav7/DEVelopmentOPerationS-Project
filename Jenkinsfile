@@ -161,7 +161,7 @@ pipeline {
                             $needle = "-name $agentName"
                             $running = Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
                                 Where-Object {
-                                    $_.Name -match '^java(?:w)?(?:\.exe)?$' -and
+                                    $_.Name -match '^java(?:w)?(?:[.]exe)?$' -and
                                     $_.CommandLine -and
                                     $_.CommandLine.Contains($needle)
                                 }
@@ -200,7 +200,7 @@ pipeline {
 
                             $started = Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
                                 Where-Object {
-                                    $_.Name -match '^java(?:w)?(?:\.exe)?$' -and
+                                    $_.Name -match '^java(?:w)?(?:[.]exe)?$' -and
                                     $_.CommandLine -and
                                     $_.CommandLine.Contains($needle)
                                 }
