@@ -1748,7 +1748,29 @@ exit /b %EXITCODE%
                     Write-Host "Expected release image: $expectedImage"
                     Write-Host "Deployed release image: $deployedImage"
 
-                    $imageVersion = (& $dockerExe image inspect $expectedImage --format '{{index .Config.Labels "org.opencontainers.image.version"}}').Trim()
+                    # Read the complete label map as JSON. This avoids quoting a
+                    # dotted OCI label key inside Docker's Go-template syntax,
+                    # which can be misparsed by the Windows/PowerShell invocation.
+                    $labelsJson = (& $dockerExe image inspect $expectedImage --format '{{json .Config.Labels}}' 2>&1)
+                    if ($LASTEXITCODE -ne 0) {
+                        throw "Docker image label inspection failed for $expectedImage."
+                    }
+
+                    try {
+                        $labels = $labelsJson | ConvertFrom-Json
+                    }
+                    catch {
+                        throw "Docker image labels could not be parsed as JSON: $labelsJson"
+                    }
+
+                    $imageVersionProperty = $labels.PSObject.Properties['org.opencontainers.image.version']
+                    $imageVersion = if ($imageVersionProperty) {
+                        [string]$imageVersionProperty.Value
+                    }
+                    else {
+                        ''
+                    }
+
                     if ($imageVersion -ne $expectedVersion) {
                         throw "Docker image version label mismatch. Expected=$expectedVersion Actual=$imageVersion"
                     }
