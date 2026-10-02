@@ -1,6 +1,10 @@
 pipeline {
     agent any
 
+    // The top-level pipeline stays on any available Jenkins executor.
+    // Docker-specific stages below explicitly allocate the docker-desktop
+    // agent, keeping the controller-side orchestration intact.
+
     parameters {
         choice(
             name: 'DEPLOY_ENV',
@@ -50,6 +54,19 @@ pipeline {
         // PowerShell step prepends this directory before invoking Docker.
         DOCKER_BIN_DIR    = 'C:\\Users\\kphvj\\AppData\\Local\\Programs\\DockerDesktop\\resources\\bin'
 
+        // ------------------------------------------------------------
+        // Jenkins controller -> Docker Desktop inbound agent bootstrap
+        // ------------------------------------------------------------
+        // The agent is an inbound WebSocket agent. Its secret MUST be kept
+        // in Jenkins Credentials as Secret Text with ID
+        // `docker-desktop-agent-secret`; never commit the value to Git.
+        JENKINS_AGENT_URL   = 'http://localhost:8081/'
+        DOCKER_AGENT_NAME   = 'docker-desktop-agent'
+        DOCKER_AGENT_LABEL  = 'docker-desktop'
+        DOCKER_AGENT_HOME   = 'C:\\Jenkins\\docker-agent'
+        DOCKER_AGENT_JAR    = 'C:\\Jenkins\\docker-agent\\agent.jar'
+        JAVA_EXE            = 'C:\\Program Files\\Eclipse Adoptium\\jdk-25.0.4+7\\bin\\java.exe'
+
         // Week 12 release metadata. Runtime values are overwritten from the Jenkins build number.
         LEAVEFLOW_APP_IMAGE   = 'leave-approval-system:latest'
         LEAVEFLOW_APP_VERSION = 'dev'
@@ -72,6 +89,161 @@ pipeline {
     }
 
     stages {
+
+        // ============================================================
+        // CONTROLLER-SIDE AGENT BOOTSTRAP
+        // ============================================================
+        // The built-in Jenkins executor starts the inbound Docker agent only
+        // when a Docker deployment is requested. The later Docker stages use
+        // node(label: 'docker-desktop') and therefore execute on the
+        // docker-desktop-agent machine/workspace.
+
+        stage('Bootstrap Docker Desktop Agent') {
+            when {
+                beforeAgent true
+                expression {
+                    params.DEPLOY_MODE == 'docker'
+                }
+            }
+
+            steps {
+                script {
+                    withCredentials([
+                        string(
+                            credentialsId: 'docker-desktop-agent-secret',
+                            variable: 'DOCKER_AGENT_SECRET'
+                        )
+                    ]) {
+                        powershell '''
+                            $ErrorActionPreference = "Stop"
+
+                            $agentName = $env:DOCKER_AGENT_NAME
+                            $agentHome = $env:DOCKER_AGENT_HOME
+                            $agentJar = $env:DOCKER_AGENT_JAR
+                            $javaExe = $env:JAVA_EXE
+                            $jenkinsUrl = $env:JENKINS_AGENT_URL
+
+                            Write-Host "=========================================="
+                            Write-Host "Jenkins Controller -> Docker Agent Bootstrap"
+                            Write-Host "=========================================="
+                            Write-Host "Agent name: $agentName"
+                            Write-Host "Agent home: $agentHome"
+                            Write-Host "Jenkins URL: $jenkinsUrl"
+
+                            $controllerIdentity = (whoami).Trim()
+                            Write-Host "Controller executor Windows identity: $controllerIdentity"
+                            Write-Host "The Docker agent will inherit this Windows identity when started by this stage."
+
+                            if (-not (Test-Path $javaExe)) {
+                                throw "Java executable not found: $javaExe"
+                            }
+
+                            New-Item -ItemType Directory -Path $agentHome -Force | Out-Null
+
+                            if (-not (Test-Path $agentJar)) {
+                                Write-Host "agent.jar not found. Downloading from Jenkins controller..."
+
+                                $agentJarUrl = $jenkinsUrl.TrimEnd('/') + '/jnlpJars/agent.jar'
+                                & curl.exe -fL --retry 3 --retry-delay 2 -o $agentJar $agentJarUrl
+
+                                if ($LASTEXITCODE -ne 0 -or -not (Test-Path $agentJar)) {
+                                    throw "Unable to download Jenkins agent.jar from $agentJarUrl"
+                                }
+
+                                Write-Host "agent.jar downloaded successfully."
+                            }
+                            else {
+                                Write-Host "agent.jar already exists. Reusing the local copy."
+                            }
+
+                            # Do not start a second inbound agent process with the
+                            # same Jenkins node name if one is already running.
+                            $needle = "-name $agentName"
+                            $running = Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
+                                Where-Object {
+                                    $_.Name -match '^java(?:w)?(?:\.exe)?$' -and
+                                    $_.CommandLine -and
+                                    $_.CommandLine.Contains($needle)
+                                }
+
+                            if ($running) {
+                                Write-Host "Inbound agent process is already running. No duplicate process will be started."
+                                $running | ForEach-Object {
+                                    Write-Host "Existing agent PID: $($_.ProcessId)"
+                                }
+                                exit 0
+                            }
+
+                            Write-Host "Starting inbound WebSocket agent..."
+
+                            $agentArguments = @(
+                                '-jar',
+                                $agentJar,
+                                '-url',
+                                $jenkinsUrl,
+                                '-secret',
+                                $env:DOCKER_AGENT_SECRET,
+                                '-name',
+                                $agentName,
+                                '-webSocket',
+                                '-workDir',
+                                $agentHome
+                            )
+
+                            Start-Process `
+                                -FilePath $javaExe `
+                                -ArgumentList $agentArguments `
+                                -WorkingDirectory $agentHome `
+                                -WindowStyle Hidden
+
+                            Start-Sleep -Seconds 5
+
+                            $started = Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
+                                Where-Object {
+                                    $_.Name -match '^java(?:w)?(?:\.exe)?$' -and
+                                    $_.CommandLine -and
+                                    $_.CommandLine.Contains($needle)
+                                }
+
+                            if (-not $started) {
+                                throw "Docker Desktop inbound agent process did not remain running after startup."
+                            }
+
+                            Write-Host "Docker Desktop inbound agent process started successfully."
+                            Write-Host "The next verification stage will wait for Jenkins to allocate the docker-desktop agent."
+                        '''
+                    }
+                }
+            }
+        }
+
+        stage('Verify Docker Agent Allocation') {
+            when {
+                beforeAgent true
+                expression {
+                    params.DEPLOY_MODE == 'docker'
+                }
+            }
+
+            options {
+                timeout(
+                    time: 2,
+                    unit: 'MINUTES'
+                )
+            }
+
+            agent {
+                node {
+                    label 'docker-desktop'
+                    customWorkspace 'C:\\Jenkins\\docker-agent-workspace\\Leave-Approval-CI_CD'
+                }
+            }
+
+            steps {
+                echo "Docker agent allocated successfully: ${env.NODE_NAME}"
+                echo "Docker agent workspace: ${env.WORKSPACE}"
+            }
+        }
 
         // ============================================================
         // VALIDATION & CHECKOUT
@@ -1214,6 +1386,9 @@ exit /b %EXITCODE%
         // DOCKER INTEGRATION
         // ============================================================
 
+        // Every stage in this Docker section is intentionally bound to the
+        // Docker Desktop agent. The current node is named
+        // `docker-desktop-agent` and carries the `docker-desktop` label.
         stage('Ensure Docker Desktop Running') {
             agent {
                 node {
