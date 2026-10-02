@@ -30,7 +30,10 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    image: leave-approval-system:latest
+      args:
+        APP_VERSION: ${LEAVEFLOW_APP_VERSION:-dev}
+
+    image: ${LEAVEFLOW_APP_IMAGE:-leave-approval-system:latest}
     container_name: leaveflow-app
     restart: unless-stopped
 
