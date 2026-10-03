@@ -1,24 +1,76 @@
-- name: Provision Employee Leave Approval System host
+---
+- name: Configure and deploy Employee Leave Approval System
   hosts: app
-  become: true
+  gather_facts: true
+  become: false
+
   vars:
-    app_dir: /opt/leave-approval-system
+    # WSL/Docker Desktop-friendly default.
+    # For a remote Linux host, override with:
+    # -e app_dir=/opt/leave-approval-system
+    app_dir: "{{ lookup('env', 'LEAVEFLOW_ANSIBLE_APP_DIR') | default(lookup('env', 'HOME') ~ '/leave-approval-system', true) }}"
+    compose_project_name: leaveflow
+    compose_file_name: docker-compose.yml
+
+    release_version: "{{ lookup('env', 'LEAVEFLOW_APP_VERSION') | default(lookup('env', 'BUILD_NUMBER') | default('local', true), true) }}"
+
+    secret_dir: "{{ app_dir }}/secrets"
+    secret_file: "{{ secret_dir }}/leaveflow_secret_key.txt"
+
+    app_port: 8000
+
+    # Resolve Docker from the interactive WSL environment once.
+    # Ansible's module PATH can be more restrictive than the user's shell PATH.
+    docker_cli: "{{ lookup('ansible.builtin.pipe', 'command -v docker') | trim }}"
+
+  pre_tasks:
+    - name: Verify Linux target
+      ansible.builtin.assert:
+        that:
+          - ansible_facts.system == 'Linux'
+        fail_msg: >-
+          Week 13 Ansible playbook expects a Linux target. Run it from Ubuntu/WSL
+          or use a Linux remote host; do not run Linux tasks directly on Windows.
+        success_msg: >-
+          Linux target confirmed: {{ ansible_facts.distribution }}
+          {{ ansible_facts.distribution_version }}
+
+    - name: Verify Docker CLI path was resolved
+      ansible.builtin.assert:
+        that:
+          - docker_cli | length > 0
+        fail_msg: >-
+          Docker CLI could not be resolved from the WSL shell PATH.
+          Confirm Docker Desktop WSL integration is enabled and that
+          `command -v docker` works in this WSL session.
+        success_msg: "Docker CLI resolved at {{ docker_cli }}"
+
+    - name: Verify Docker CLI
+      ansible.builtin.command:
+        argv:
+          - "{{ docker_cli }}"
+          - --version
+      register: docker_version
+      changed_when: false
+      check_mode: false
+
+    - name: Verify Docker Compose v2
+      ansible.builtin.command:
+        argv:
+          - "{{ docker_cli }}"
+          - compose
+          - version
+      register: compose_version
+      changed_when: false
+      check_mode: false
+
+    - name: Verify OpenSSL
+      ansible.builtin.command: openssl version
+      register: openssl_version
+      changed_when: false
+      check_mode: false
+
   tasks:
-    - name: Install required packages
-      ansible.builtin.apt:
-        name:
-          - docker.io
-          - docker-compose-plugin
-          - curl
-        state: present
-        update_cache: true
-
-    - name: Ensure Docker service is enabled and started
-      ansible.builtin.service:
-        name: docker
-        state: started
-        enabled: true
-
     - name: Create application directory
       ansible.builtin.file:
         path: "{{ app_dir }}"
@@ -31,22 +83,170 @@
         state: directory
         mode: '0755'
 
-    - name: Copy release marker
+    - name: Create Compose secret directory
+      ansible.builtin.file:
+        path: "{{ secret_dir }}"
+        state: directory
+        mode: '0700'
+
+    - name: Check whether runtime secret already exists
+      ansible.builtin.stat:
+        path: "{{ secret_file }}"
+      register: secret_state
+      changed_when: false
+
+    - name: Create runtime secret once when absent
+      ansible.builtin.shell: >-
+        umask 077 && openssl rand -hex 32 > {{ secret_file | quote }}
+      args:
+        creates: "{{ secret_file }}"
+      when:
+        - not ansible_check_mode
+        - not secret_state.stat.exists
+      changed_when: true
+
+    - name: Enforce runtime secret permissions
+      ansible.builtin.file:
+        path: "{{ secret_file }}"
+        state: file
+        mode: '0600'
+      when: secret_state.stat.exists or not ansible_check_mode
+
+    - name: Copy Dockerfile
       ansible.builtin.copy:
-        dest: "{{ app_dir }}/RELEASE"
-        content: "{{ lookup('env', 'BUILD_NUMBER') | default('local', true) }}\n"
+        src: "{{ playbook_dir }}/../Dockerfile"
+        dest: "{{ app_dir }}/Dockerfile"
         mode: '0644'
 
-    - name: Validate Docker installation
-      ansible.builtin.command: docker --version
-      changed_when: false
+    - name: Copy Docker Compose definition
+      ansible.builtin.copy:
+        src: "{{ playbook_dir }}/../docker-compose.yml"
+        dest: "{{ app_dir }}/{{ compose_file_name }}"
+        mode: '0644'
 
-    - name: Validate Docker Compose installation
-      ansible.builtin.command: docker compose version
-      changed_when: false
+    - name: Copy Docker build metadata files
+      ansible.builtin.copy:
+        src: "{{ playbook_dir }}/../{{ item }}"
+        dest: "{{ app_dir }}/{{ item }}"
+        mode: '0644'
+      loop:
+        - requirements.txt
+        - README.md
+        - IMPLEMENTATION_STEPS.md
+        - .env.example
 
-    - name: Validate application directory idempotency
+    - name: Copy application source directories
+      ansible.builtin.copy:
+        src: "{{ playbook_dir }}/../{{ item }}/"
+        dest: "{{ app_dir }}/{{ item }}/"
+        mode: preserve
+      loop:
+        - app
+        - frontend
+        - templates
+        - sql
+        - nginx
+
+    - name: Write release marker
+      ansible.builtin.copy:
+        dest: "{{ app_dir }}/RELEASE"
+        content: "{{ release_version }}\n"
+        mode: '0644'
+
+    - name: Validate application directory
       ansible.builtin.stat:
         path: "{{ app_dir }}"
       register: app_dir_state
       changed_when: false
+
+    - name: Inspect fixed-name Compose containers
+      when: not ansible_check_mode
+      community.docker.docker_container_info:
+        name: "{{ item }}"
+      loop:
+        - leaveflow-db
+        - leaveflow-app
+        - leaveflow-nginx
+      register: fixed_name_containers
+
+    - name: Remove fixed-name containers owned by another Compose project
+      when:
+        - not ansible_check_mode
+        - item.exists | default(false)
+        - >-
+          ((item.container.Config.Labels | default({})).get('com.docker.compose.project', ''))
+          != compose_project_name
+      community.docker.docker_container:
+        name: "{{ item.item }}"
+        state: absent
+        force_kill: true
+      loop: "{{ fixed_name_containers.results | default([]) }}"
+      loop_control:
+        label: "{{ item.item }}"
+
+    - name: Deploy the Compose application
+      when: not ansible_check_mode
+      community.docker.docker_compose_v2:
+        docker_cli: "{{ docker_cli }}"
+        project_src: "{{ app_dir }}"
+        project_name: "{{ compose_project_name }}"
+        state: present
+        pull: missing
+        build: policy
+
+    - name: Verify Compose application status
+      when: not ansible_check_mode
+      ansible.builtin.command:
+        argv:
+          - "{{ docker_cli }}"
+          - compose
+          - -p
+          - "{{ compose_project_name }}"
+          - ps
+      register: compose_ps
+      changed_when: false
+      check_mode: false
+
+    - name: Wait for application health
+      when: not ansible_check_mode
+      ansible.builtin.uri:
+        url: "http://127.0.0.1:{{ app_port }}/health"
+        method: GET
+        status_code: 200
+        return_content: true
+      register: health_response
+      retries: 10
+      delay: 3
+      until: health_response.status == 200
+
+    - name: Confirm PostgreSQL-backed health response
+      when: not ansible_check_mode
+      ansible.builtin.assert:
+        that:
+          - health_response.json.status == 'ok'
+          - health_response.json.database == 'postgresql'
+        fail_msg: >-
+          Application health endpoint did not confirm the expected
+          PostgreSQL-backed state.
+          Response: {{ health_response.content | default('no response', true) }}
+        success_msg: FastAPI health check confirms PostgreSQL connectivity.
+
+    - name: Report check-mode limitation
+      when: ansible_check_mode
+      ansible.builtin.debug:
+        msg: >-
+          Check mode completed without live Compose deployment or HTTP health
+          verification. Run the playbook without --check for the actual Docker
+          deployment and runtime health checks.
+
+    - name: Display final Ansible deployment summary
+      ansible.builtin.debug:
+        msg:
+          - "Release: {{ release_version }}"
+          - "Application directory: {{ app_dir }}"
+          - "Docker: {{ docker_version.stdout }}"
+          - "Compose: {{ compose_version.stdout }}"
+          - "OpenSSL: {{ openssl_version.stdout }}"
+          - "Compose project: {{ compose_project_name }}"
+          - "Health endpoint: http://127.0.0.1:{{ app_port }}/health"
+          - "Application directory exists: {{ app_dir_state.stat.exists }}"

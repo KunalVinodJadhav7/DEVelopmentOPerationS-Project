@@ -36,6 +36,19 @@ pipeline {
             trim: true,
             description: 'Repository path for publishing, for example username/employee-leave-approval-system. Required only when publishing is enabled.'
         )
+
+        booleanParam(
+            name: 'RUN_ANSIBLE',
+            defaultValue: false,
+            description: 'Week 13: validate the Ansible playbook from the Windows Jenkins controller through WSL. Disabled by default so Week 12 Docker CI/CD behavior is unchanged.'
+        )
+
+        string(
+            name: 'ANSIBLE_APP_DIR',
+            defaultValue: '',
+            trim: true,
+            description: 'Optional Week 13 Ansible application directory override. Leave blank to use the WSL user home directory.'
+        )
     }
 
     environment {
@@ -48,6 +61,7 @@ pipeline {
         DOCKER_BASE_URL   = 'http://localhost:8000'
         DOCKER_EXE        = 'C:\\Users\\kphvj\\AppData\\Local\\Programs\\DockerDesktop\\resources\\bin\\docker.exe'
         DOCKER_CONFIG     = 'C:\\Users\\kphvj\\.docker'
+        ANSIBLE_APP_DIR   = "${params.ANSIBLE_APP_DIR}"
 
         // Docker Desktop installs its credential helper beside docker.exe.
         // Jenkins may not inherit that directory in PATH. Each Docker
@@ -450,6 +464,79 @@ pipeline {
                 )
             }
         }
+
+        // ============================================================
+        // WEEK 13 - ANSIBLE VALIDATION
+        //
+        // Runs explicitly through WSL so the Windows Jenkins controller
+        // does not have to host native Ansible. This stage is validation
+        // only; the normal Week 12 Docker deployment path is untouched.
+        // ============================================================
+
+        stage('Week 13 - Ansible Validation') {
+            when {
+                expression {
+                    params.RUN_ANSIBLE
+                }
+            }
+
+            steps {
+                powershell '''
+                    $ErrorActionPreference = "Stop"
+
+                    $wsl = Join-Path $env:WINDIR 'System32\\wsl.exe'
+
+                    if (-not (Test-Path $wsl)) {
+                        throw "WSL executable not found: $wsl"
+                    }
+
+                    Write-Host "=========================================="
+                    Write-Host "Week 13 Ansible Validation"
+                    Write-Host "=========================================="
+
+                    & $wsl --status
+                    & $wsl ansible-playbook --version
+
+                    $wslWorkspace = (& $wsl wslpath -a $env:WORKSPACE).Trim()
+
+                    if ([string]::IsNullOrWhiteSpace($wslWorkspace)) {
+                        throw 'Unable to convert Jenkins workspace to a WSL path.'
+                    }
+
+                    Write-Host "WSL workspace: $wslWorkspace"
+
+                    & $wsl ansible-galaxy collection install -r "$wslWorkspace/ansible/requirements.yml"
+                    if ($LASTEXITCODE -ne 0) {
+                        throw 'Ansible collection installation failed.'
+                    }
+
+                    & $wsl ansible-playbook `
+                        -i "$wslWorkspace/ansible/inventory.ini" `
+                        "$wslWorkspace/ansible/site.yml" `
+                        --syntax-check
+                    if ($LASTEXITCODE -ne 0) {
+                        throw 'Ansible syntax check failed.'
+                    }
+
+                    $extraVars = @()
+                    if (-not [string]::IsNullOrWhiteSpace($env:ANSIBLE_APP_DIR)) {
+                        $extraVars = @('-e', "app_dir=$($env:ANSIBLE_APP_DIR)")
+                    }
+
+                    & $wsl ansible-playbook `
+                        -i "$wslWorkspace/ansible/inventory.ini" `
+                        "$wslWorkspace/ansible/site.yml" `
+                        --check `
+                        @extraVars
+                    if ($LASTEXITCODE -ne 0) {
+                        throw 'Ansible check-mode validation failed.'
+                    }
+
+                    Write-Host "Week 13 Ansible syntax and check-mode validation succeeded."
+                '''
+            }
+        }
+
 
         // ============================================================
         // WEEK 12 - DOCKER RELEASE METADATA
