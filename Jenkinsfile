@@ -484,55 +484,64 @@ pipeline {
                 powershell '''
                     $ErrorActionPreference = "Stop"
 
-                    $wsl = Join-Path $env:WINDIR 'System32\\wsl.exe'
-
-                    if (-not (Test-Path $wsl)) {
-                        throw "WSL executable not found: $wsl"
-                    }
+                    # Jenkins runs as LocalSystem on Windows. WSL cannot be
+                    # launched from the LocalSystem account, so Week 13 Ansible
+                    # validation runs inside the official Docker CLI image instead.
+                    $dockerExe = $env:DOCKER_EXE
+                    $dockerBinDir = $env:DOCKER_BIN_DIR
+                    $workspace = $env:WORKSPACE
+                    $ansibleImage = 'docker:29.8.0-cli'
 
                     Write-Host "=========================================="
-                    Write-Host "Week 13 Ansible Validation"
+                    Write-Host "Week 13 Ansible Validation via Docker"
                     Write-Host "=========================================="
 
-                    & $wsl --status
-                    & $wsl ansible-playbook --version
-
-                    $wslWorkspace = (& $wsl wslpath -a $env:WORKSPACE).Trim()
-
-                    if ([string]::IsNullOrWhiteSpace($wslWorkspace)) {
-                        throw 'Unable to convert Jenkins workspace to a WSL path.'
+                    if (-not (Test-Path $dockerExe)) {
+                        throw "Docker CLI not found: $dockerExe"
                     }
 
-                    Write-Host "WSL workspace: $wslWorkspace"
+                    if (-not ($env:PATH -split ';' | Where-Object { $_ -eq $dockerBinDir })) {
+                        $env:PATH = "$dockerBinDir;$env:PATH"
+                    }
 
-                    & $wsl ansible-galaxy collection install -r "$wslWorkspace/ansible/requirements.yml"
+                    & $dockerExe --version
                     if ($LASTEXITCODE -ne 0) {
-                        throw 'Ansible collection installation failed.'
+                        throw 'Docker CLI verification failed.'
                     }
 
-                    & $wsl ansible-playbook `
-                        -i "$wslWorkspace/ansible/inventory.ini" `
-                        "$wslWorkspace/ansible/site.yml" `
-                        --syntax-check
+                    Write-Host "Docker image: $ansibleImage"
+                    Write-Host "Jenkins workspace: $workspace"
+
+                    # The container performs syntax/check-mode validation only.
+                    # It does not access WSL and does not deploy containers.
+                    # The workspace is mounted so Ansible reads the exact files
+                    # checked out by this Jenkins build.
+                    $command = @'
+set -eu
+apk add --no-cache python3 py3-pip openssl
+python3 -m venv /opt/ansible-venv
+/opt/ansible-venv/bin/pip install --no-cache-dir ansible-core==2.21.4
+/opt/ansible-venv/bin/ansible-galaxy collection install -r /workspace/ansible/requirements.yml
+/opt/ansible-venv/bin/ansible-playbook -i /workspace/ansible/inventory.ini /workspace/ansible/site.yml --syntax-check
+/opt/ansible-venv/bin/ansible-playbook -i /workspace/ansible/inventory.ini /workspace/ansible/site.yml --check
+'@
+
+                    $dockerArgs = @(
+                        'run',
+                        '--rm',
+                        '--pull', 'missing',
+                        '--mount', "type=bind,source=$workspace,target=/workspace",
+                        '--entrypoint', 'sh',
+                        $ansibleImage,
+                        '-c', $command
+                    )
+
+                    & $dockerExe @dockerArgs
                     if ($LASTEXITCODE -ne 0) {
-                        throw 'Ansible syntax check failed.'
+                        throw 'Ansible Docker validation container failed.'
                     }
 
-                    $extraVars = @()
-                    if (-not [string]::IsNullOrWhiteSpace($env:ANSIBLE_APP_DIR)) {
-                        $extraVars = @('-e', "app_dir=$($env:ANSIBLE_APP_DIR)")
-                    }
-
-                    & $wsl ansible-playbook `
-                        -i "$wslWorkspace/ansible/inventory.ini" `
-                        "$wslWorkspace/ansible/site.yml" `
-                        --check `
-                        @extraVars
-                    if ($LASTEXITCODE -ne 0) {
-                        throw 'Ansible check-mode validation failed.'
-                    }
-
-                    Write-Host "Week 13 Ansible syntax and check-mode validation succeeded."
+                    Write-Host "Week 13 Ansible syntax and check-mode validation succeeded inside Docker."
                 '''
             }
         }
