@@ -2382,16 +2382,21 @@ exit /b %EXITCODE%
                             Write-Host "Docker secret successfully bound."
                             Write-Host "Docker secret length: $($dockerPassword.Length)"
 
-                            # Safe credential diagnostic: print only a SHA-256
-                            # fingerprint, never the Docker Hub PAT itself.
-                            # Compare this fingerprint with the PAT tested manually
-                            # outside Jenkins to prove whether Jenkins has the
-                            # exact same secret value.
-                            $secretBytes = [System.Text.Encoding]::UTF8.GetBytes($dockerPassword)
-                            $secretHash = [System.Security.Cryptography.SHA256]::HashData($secretBytes)
-                            $secretFingerprint = [Convert]::ToHexString($secretHash)
-                            Write-Host "Docker credential SHA-256: $secretFingerprint"
+                            # Jenkins is running Windows PowerShell/.NET Framework on
+                            # the Docker Desktop agent. Use ComputeHash() rather than
+                            # SHA256.HashData(), which is unavailable on older .NET.
+                            # The PAT itself is never written to the build log.
+                            $sha256 = [System.Security.Cryptography.SHA256]::Create()
+                            try {
+                                $secretBytes = [System.Text.Encoding]::UTF8.GetBytes($dockerPassword)
+                                $secretHash = $sha256.ComputeHash($secretBytes)
+                                $secretFingerprint = [System.BitConverter]::ToString($secretHash).Replace('-', '').ToLowerInvariant()
+                            }
+                            finally {
+                                $sha256.Dispose()
+                            }
 
+                            Write-Host "Docker credential SHA-256: $secretFingerprint"
                             Write-Host "Docker registry: $registry"
                             Write-Host "Docker repository: $repository"
                             Write-Host "Publishing release image: $remoteVersion"
@@ -2456,7 +2461,6 @@ exit /b %EXITCODE%
                                 }
 
                                 Write-Host "Docker registry login succeeded."
-                                Write-Host "Docker Hub authentication verified from the Jenkins Docker agent."
 
                                 & $dockerExe tag $releaseImage $remoteVersion
                                 if ($LASTEXITCODE -ne 0) {
