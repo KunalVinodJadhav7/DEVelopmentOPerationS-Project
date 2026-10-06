@@ -2331,15 +2331,20 @@ exit /b %EXITCODE%
                         )
                     }
 
+                    // Docker Hub username is intentionally explicit. The Jenkins
+                    // credential stores only the PAT, avoiding ambiguity in the
+                    // username/password credential binding.
+                    def dockerHubUsername = 'kphvj'
+
                     withEnv([
                         "PUBLISH_REGISTRY=${publishRegistry}",
-                        "PUBLISH_REPOSITORY=${publishRepository}"
+                        "PUBLISH_REPOSITORY=${publishRepository}",
+                        "DOCKERHUB_USERNAME=${dockerHubUsername}"
                     ]) {
                         withCredentials([
-                            usernamePassword(
+                            string(
                                 credentialsId: 'dockerhub-credentials',
-                                usernameVariable: 'DOCKER_USERNAME',
-                                passwordVariable: 'DOCKER_PASSWORD'
+                                variable: 'DOCKER_PASSWORD'
                             )
                         ]) {
                             powershell '''
@@ -2349,23 +2354,22 @@ exit /b %EXITCODE%
                             $dockerBinDir = $env:DOCKER_BIN_DIR
                             $registry = $env:PUBLISH_REGISTRY.Trim()
                             $repository = $env:PUBLISH_REPOSITORY.Trim()
+                            $dockerUsername = $env:DOCKERHUB_USERNAME.Trim()
+                            $dockerPassword = $env:DOCKER_PASSWORD.Trim()
                             $releaseVersion = "1.0.$($env:BUILD_NUMBER)"
                             $releaseImage = "leave-approval-system:$releaseVersion"
 
-                            $dockerUsername = $env:DOCKER_USERNAME.Trim()
-                            $dockerPassword = $env:DOCKER_PASSWORD.Trim()
+                            if (-not (Test-Path $dockerExe)) {
+                                throw "Docker CLI not found: $dockerExe"
+                            }
 
                             if ([string]::IsNullOrWhiteSpace($dockerUsername)) {
-                                throw "Docker Hub username was not bound by Jenkins."
+                                throw "Docker Hub username was not configured."
                             }
 
                             if ([string]::IsNullOrWhiteSpace($dockerPassword)) {
-                                throw "Docker Hub password/token was not bound by Jenkins."
+                                throw "Docker Hub PAT was not supplied by Jenkins credential dockerhub-credentials."
                             }
-
-                            Write-Host "Docker Hub username bound by Jenkins: $dockerUsername"
-                            Write-Host "Docker secret successfully bound."
-                            Write-Host "Docker secret length: $($dockerPassword.Length)"
 
                             if (-not ($env:PATH -split ';' | Where-Object { $_ -eq $dockerBinDir })) {
                                 $env:PATH = "$dockerBinDir;$env:PATH"
@@ -2374,14 +2378,17 @@ exit /b %EXITCODE%
                             $remoteVersion = "$registry/$repository`:$releaseVersion"
                             $remoteLatest = "$registry/$repository`:latest"
 
+                            Write-Host "Docker Hub username: $dockerUsername"
+                            Write-Host "Docker secret successfully bound."
+                            Write-Host "Docker secret length: $($dockerPassword.Length)"
                             Write-Host "Docker registry: $registry"
                             Write-Host "Docker repository: $repository"
                             Write-Host "Publishing release image: $remoteVersion"
                             Write-Host "Publishing latest image: $remoteLatest"
 
                             # Use an isolated Docker client configuration for Jenkins.
-                            # This prevents Jenkins from depending on the interactive
-                            # user's Docker credential store.
+                            # This prevents Jenkins from using any interactive user's
+                            # Docker credential helper or stale credentials.
                             $tempDockerConfig = Join-Path `
                                 $env:TEMP `
                                 "jenkins-docker-config-$env:BUILD_NUMBER"
@@ -2397,13 +2404,44 @@ exit /b %EXITCODE%
                             try {
                                 Write-Host "Authenticating to Docker registry..."
 
-                                $dockerPassword | & $dockerExe login `
-                                    $registry `
-                                    --username $dockerUsername `
-                                    --password-stdin
+                                # Invoke docker.exe through .NET so the PAT is written
+                                # directly to stdin. This avoids ambiguity from the
+                                # PowerShell native-command pipeline encoding.
+                                $psi = New-Object System.Diagnostics.ProcessStartInfo
+                                $psi.FileName = $dockerExe
+                                $psi.UseShellExecute = $false
+                                $psi.RedirectStandardInput = $true
+                                $psi.RedirectStandardOutput = $true
+                                $psi.RedirectStandardError = $true
+                                $psi.CreateNoWindow = $true
+                                $psi.Arguments = "login `"$registry`" --username `"$dockerUsername`" --password-stdin"
 
-                                if ($LASTEXITCODE -ne 0) {
-                                    throw "Docker registry login failed."
+                                $loginProcess = New-Object System.Diagnostics.Process
+                                $loginProcess.StartInfo = $psi
+
+                                if (-not $loginProcess.Start()) {
+                                    throw "Unable to start Docker login process."
+                                }
+
+                                $loginProcess.StandardInput.Write($dockerPassword)
+                                $loginProcess.StandardInput.Write("`n")
+                                $loginProcess.StandardInput.Close()
+
+                                $loginStdOut = $loginProcess.StandardOutput.ReadToEnd()
+                                $loginStdErr = $loginProcess.StandardError.ReadToEnd()
+                                $loginProcess.WaitForExit()
+                                $loginExitCode = $loginProcess.ExitCode
+                                $loginProcess.Dispose()
+
+                                if ($loginStdOut) {
+                                    Write-Host $loginStdOut.Trim()
+                                }
+
+                                if ($loginExitCode -ne 0) {
+                                    if ($loginStdErr) {
+                                        Write-Host $loginStdErr.Trim()
+                                    }
+                                    throw "Docker registry login failed with exit code $loginExitCode."
                                 }
 
                                 Write-Host "Docker registry login succeeded."
@@ -2418,11 +2456,13 @@ exit /b %EXITCODE%
                                     throw "Failed to tag Docker latest image for publishing."
                                 }
 
+                                Write-Host "Pushing versioned image..."
                                 & $dockerExe push $remoteVersion
                                 if ($LASTEXITCODE -ne 0) {
                                     throw "Failed to push versioned Docker image: $remoteVersion"
                                 }
 
+                                Write-Host "Pushing latest image..."
                                 & $dockerExe push $remoteLatest
                                 if ($LASTEXITCODE -ne 0) {
                                     throw "Failed to push Docker latest image: $remoteLatest"
@@ -2446,7 +2486,6 @@ exit /b %EXITCODE%
                                     -Path $tempDockerConfig `
                                     -ErrorAction SilentlyContinue
                             }
-                        '''
                         }
                     }
                 }
