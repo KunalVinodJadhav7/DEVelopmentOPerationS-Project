@@ -2486,6 +2486,7 @@ exit /b %EXITCODE%
                                     -Path $tempDockerConfig `
                                     -ErrorAction SilentlyContinue
                             }
+                            '''
                         }
                     }
                 }
