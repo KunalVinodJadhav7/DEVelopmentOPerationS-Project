@@ -484,64 +484,55 @@ pipeline {
                 powershell '''
                     $ErrorActionPreference = "Stop"
 
-                    # Jenkins runs as LocalSystem on Windows. WSL cannot be
-                    # launched from the LocalSystem account, so Week 13 Ansible
-                    # validation runs inside the official Docker CLI image instead.
-                    $dockerExe = $env:DOCKER_EXE
-                    $dockerBinDir = $env:DOCKER_BIN_DIR
-                    $workspace = $env:WORKSPACE
-                    $ansibleImage = 'docker:29.8.0-cli'
+                    $wsl = Join-Path $env:WINDIR 'System32\\wsl.exe'
+
+                    if (-not (Test-Path $wsl)) {
+                        throw "WSL executable not found: $wsl"
+                    }
 
                     Write-Host "=========================================="
-                    Write-Host "Week 13 Ansible Validation via Docker"
+                    Write-Host "Week 13 Ansible Validation"
                     Write-Host "=========================================="
 
-                    if (-not (Test-Path $dockerExe)) {
-                        throw "Docker CLI not found: $dockerExe"
+                    & $wsl --status
+                    & $wsl ansible-playbook --version
+
+                    $wslWorkspace = (& $wsl wslpath -a $env:WORKSPACE).Trim()
+
+                    if ([string]::IsNullOrWhiteSpace($wslWorkspace)) {
+                        throw 'Unable to convert Jenkins workspace to a WSL path.'
                     }
 
-                    if (-not ($env:PATH -split ';' | Where-Object { $_ -eq $dockerBinDir })) {
-                        $env:PATH = "$dockerBinDir;$env:PATH"
-                    }
+                    Write-Host "WSL workspace: $wslWorkspace"
 
-                    & $dockerExe --version
+                    & $wsl ansible-galaxy collection install -r "$wslWorkspace/ansible/requirements.yml"
                     if ($LASTEXITCODE -ne 0) {
-                        throw 'Docker CLI verification failed.'
+                        throw 'Ansible collection installation failed.'
                     }
 
-                    Write-Host "Docker image: $ansibleImage"
-                    Write-Host "Jenkins workspace: $workspace"
-
-                    # The container performs syntax/check-mode validation only.
-                    # It does not access WSL and does not deploy containers.
-                    # The workspace is mounted so Ansible reads the exact files
-                    # checked out by this Jenkins build.
-                    $command = @'
-set -eu
-apk add --no-cache python3 py3-pip openssl
-python3 -m venv /opt/ansible-venv
-/opt/ansible-venv/bin/pip install --no-cache-dir ansible-core==2.21.4
-/opt/ansible-venv/bin/ansible-galaxy collection install -r /workspace/ansible/requirements.yml
-/opt/ansible-venv/bin/ansible-playbook -i /workspace/ansible/inventory.ini /workspace/ansible/site.yml --syntax-check
-/opt/ansible-venv/bin/ansible-playbook -i /workspace/ansible/inventory.ini /workspace/ansible/site.yml --check
-'@
-
-                    $dockerArgs = @(
-                        'run',
-                        '--rm',
-                        '--pull', 'missing',
-                        '--mount', "type=bind,source=$workspace,target=/workspace",
-                        '--entrypoint', 'sh',
-                        $ansibleImage,
-                        '-c', $command
-                    )
-
-                    & $dockerExe @dockerArgs
+                    & $wsl ansible-playbook `
+                        -i "$wslWorkspace/ansible/inventory.ini" `
+                        "$wslWorkspace/ansible/site.yml" `
+                        --syntax-check
                     if ($LASTEXITCODE -ne 0) {
-                        throw 'Ansible Docker validation container failed.'
+                        throw 'Ansible syntax check failed.'
                     }
 
-                    Write-Host "Week 13 Ansible syntax and check-mode validation succeeded inside Docker."
+                    $extraVars = @()
+                    if (-not [string]::IsNullOrWhiteSpace($env:ANSIBLE_APP_DIR)) {
+                        $extraVars = @('-e', "app_dir=$($env:ANSIBLE_APP_DIR)")
+                    }
+
+                    & $wsl ansible-playbook `
+                        -i "$wslWorkspace/ansible/inventory.ini" `
+                        "$wslWorkspace/ansible/site.yml" `
+                        --check `
+                        @extraVars
+                    if ($LASTEXITCODE -ne 0) {
+                        throw 'Ansible check-mode validation failed.'
+                    }
+
+                    Write-Host "Week 13 Ansible syntax and check-mode validation succeeded."
                 '''
             }
         }
@@ -2321,6 +2312,21 @@ exit /b %EXITCODE%
                             $releaseVersion = "1.0.$($env:BUILD_NUMBER)"
                             $releaseImage = "leave-approval-system:$releaseVersion"
 
+                            $dockerUsername = $env:DOCKER_USERNAME.Trim()
+                            $dockerPassword = $env:DOCKER_PASSWORD
+
+                            if ([string]::IsNullOrWhiteSpace($dockerUsername)) {
+                                throw "Docker Hub username was not bound by Jenkins."
+                            }
+
+                            if ([string]::IsNullOrWhiteSpace($dockerPassword)) {
+                                throw "Docker Hub password/token was not bound by Jenkins."
+                            }
+
+                            Write-Host "Docker Hub username bound by Jenkins: $dockerUsername"
+                            Write-Host "Docker secret successfully bound."
+                            Write-Host "Docker secret length: $($dockerPassword.Length)"
+
                             if (-not ($env:PATH -split ';' | Where-Object { $_ -eq $dockerBinDir })) {
                                 $env:PATH = "$dockerBinDir;$env:PATH"
                             }
@@ -2331,12 +2337,35 @@ exit /b %EXITCODE%
                             Write-Host "Publishing release image: $remoteVersion"
                             Write-Host "Publishing latest image: $remoteLatest"
 
-                            $env:DOCKER_PASSWORD | & $dockerExe login $registry --username $env:DOCKER_USERNAME --password-stdin
-                            if ($LASTEXITCODE -ne 0) {
-                                throw "Docker registry login failed."
-                            }
+                            # Use an isolated Docker client configuration for Jenkins.
+                            # This prevents Jenkins from depending on the interactive
+                            # user's Docker credential store.
+                            $tempDockerConfig = Join-Path `
+                                $env:TEMP `
+                                "jenkins-docker-config-$env:BUILD_NUMBER"
+
+                            New-Item `
+                                -ItemType Directory `
+                                -Force `
+                                -Path $tempDockerConfig | Out-Null
+
+                            $previousDockerConfig = $env:DOCKER_CONFIG
+                            $env:DOCKER_CONFIG = $tempDockerConfig
 
                             try {
+                                Write-Host "Authenticating to Docker registry..."
+
+                                $dockerPassword | & $dockerExe login `
+                                    $registry `
+                                    --username $dockerUsername `
+                                    --password-stdin
+
+                                if ($LASTEXITCODE -ne 0) {
+                                    throw "Docker registry login failed."
+                                }
+
+                                Write-Host "Docker registry login succeeded."
+
                                 & $dockerExe tag $releaseImage $remoteVersion
                                 if ($LASTEXITCODE -ne 0) {
                                     throw "Failed to tag Docker release image for publishing."
@@ -2361,6 +2390,19 @@ exit /b %EXITCODE%
                             }
                             finally {
                                 & $dockerExe logout $registry | Out-Null
+
+                                if ($previousDockerConfig) {
+                                    $env:DOCKER_CONFIG = $previousDockerConfig
+                                }
+                                else {
+                                    Remove-Item Env:DOCKER_CONFIG -ErrorAction SilentlyContinue
+                                }
+
+                                Remove-Item `
+                                    -Recurse `
+                                    -Force `
+                                    -Path $tempDockerConfig `
+                                    -ErrorAction SilentlyContinue
                             }
                         '''
                     }
