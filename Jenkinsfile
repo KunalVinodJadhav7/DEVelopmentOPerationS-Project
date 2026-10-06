@@ -40,14 +40,14 @@ pipeline {
         booleanParam(
             name: 'RUN_ANSIBLE',
             defaultValue: false,
-            description: 'Week 13: validate the Ansible playbook from the Windows Jenkins controller through WSL. Disabled by default so Week 12 Docker CI/CD behavior is unchanged.'
+            description: 'Week 13: validate the Ansible playbook inside a Docker-based Ansible environment. Disabled by default so Week 12 Docker CI/CD behavior is unchanged.'
         )
 
         string(
             name: 'ANSIBLE_APP_DIR',
             defaultValue: '',
             trim: true,
-            description: 'Optional Week 13 Ansible application directory override. Leave blank to use the WSL user home directory.'
+            description: 'Optional Week 13 Ansible application directory override. Leave blank to use the playbook default application directory.'
         )
     }
 
@@ -61,7 +61,6 @@ pipeline {
         DOCKER_BASE_URL   = 'http://localhost:8000'
         DOCKER_EXE        = 'C:\\Users\\kphvj\\AppData\\Local\\Programs\\DockerDesktop\\resources\\bin\\docker.exe'
         DOCKER_CONFIG     = 'C:\\Users\\kphvj\\.docker'
-        ANSIBLE_APP_DIR   = "${params.ANSIBLE_APP_DIR}"
 
         // Docker Desktop installs its credential helper beside docker.exe.
         // Jenkins may not inherit that directory in PATH. Each Docker
@@ -468,9 +467,10 @@ pipeline {
         // ============================================================
         // WEEK 13 - ANSIBLE VALIDATION
         //
-        // Runs explicitly through WSL so the Windows Jenkins controller
-        // does not have to host native Ansible. This stage is validation
-        // only; the normal Week 12 Docker deployment path is untouched.
+        // Runs inside a Docker-based Ansible validation environment so the
+        // Windows Jenkins controller does not have to host native Ansible.
+        // This stage is validation only; the normal Week 12 Docker deployment
+        // path is untouched.
         // ============================================================
 
         stage('Week 13 - Ansible Validation') {
@@ -481,7 +481,11 @@ pipeline {
             }
 
             steps {
-                powershell '''
+                script {
+                    def ansibleAppDir = params.ANSIBLE_APP_DIR?.trim() ?: ''
+
+                    withEnv(["RUN_ANSIBLE_APP_DIR=${ansibleAppDir}"]) {
+                        powershell '''
                     $ErrorActionPreference = "Stop"
 
                     # Jenkins runs as LocalSystem on Windows. WSL cannot be
@@ -537,11 +541,13 @@ else
 fi
 '@
 
+                    $ansibleAppDir = $env:RUN_ANSIBLE_APP_DIR
+
                     $dockerArgs = @(
                         'run',
                         '--rm',
                         '--pull', 'missing',
-                        '--env', "LEAVEFLOW_ANSIBLE_APP_DIR=$env:ANSIBLE_APP_DIR",
+                        '--env', "LEAVEFLOW_ANSIBLE_APP_DIR=$ansibleAppDir",
                         '--env', "LEAVEFLOW_APP_VERSION=1.0.$env:BUILD_NUMBER",
                         '--mount', "type=bind,source=$workspace,target=/workspace",
                         '--entrypoint', 'sh',
@@ -555,7 +561,9 @@ fi
                     }
 
                     Write-Host "Week 13 Ansible syntax and check-mode validation succeeded inside Docker."
-                '''
+                        '''
+                    }
+                }
             }
         }
 
@@ -2310,32 +2318,42 @@ exit /b %EXITCODE%
 
             steps {
                 script {
-                    if (!params.DOCKERHUB_REPOSITORY?.trim()) {
+                    def publishRegistry = params.DOCKER_REGISTRY?.trim()
+                    if (!publishRegistry) {
+                        publishRegistry = 'docker.io'
+                    }
+
+                    def publishRepository = params.DOCKERHUB_REPOSITORY?.trim()
+                    if (!publishRepository) {
                         error(
                             'DOCKERHUB_REPOSITORY is required when PUBLISH_DOCKER_IMAGE is enabled. ' +
                             'Example: username/employee-leave-approval-system'
                         )
                     }
 
-                    withCredentials([
-                        usernamePassword(
-                            credentialsId: 'dockerhub-credentials',
-                            usernameVariable: 'DOCKER_USERNAME',
-                            passwordVariable: 'DOCKER_PASSWORD'
-                        )
+                    withEnv([
+                        "PUBLISH_REGISTRY=${publishRegistry}",
+                        "PUBLISH_REPOSITORY=${publishRepository}"
                     ]) {
-                        powershell '''
+                        withCredentials([
+                            usernamePassword(
+                                credentialsId: 'dockerhub-credentials',
+                                usernameVariable: 'DOCKER_USERNAME',
+                                passwordVariable: 'DOCKER_PASSWORD'
+                            )
+                        ]) {
+                            powershell '''
                             $ErrorActionPreference = "Stop"
 
                             $dockerExe = $env:DOCKER_EXE
                             $dockerBinDir = $env:DOCKER_BIN_DIR
-                            $registry = $env:DOCKER_REGISTRY.Trim()
-                            $repository = $env:DOCKERHUB_REPOSITORY.Trim()
+                            $registry = $env:PUBLISH_REGISTRY.Trim()
+                            $repository = $env:PUBLISH_REPOSITORY.Trim()
                             $releaseVersion = "1.0.$($env:BUILD_NUMBER)"
                             $releaseImage = "leave-approval-system:$releaseVersion"
 
                             $dockerUsername = $env:DOCKER_USERNAME.Trim()
-                            $dockerPassword = $env:DOCKER_PASSWORD
+                            $dockerPassword = $env:DOCKER_PASSWORD.Trim()
 
                             if ([string]::IsNullOrWhiteSpace($dockerUsername)) {
                                 throw "Docker Hub username was not bound by Jenkins."
@@ -2356,6 +2374,8 @@ exit /b %EXITCODE%
                             $remoteVersion = "$registry/$repository`:$releaseVersion"
                             $remoteLatest = "$registry/$repository`:latest"
 
+                            Write-Host "Docker registry: $registry"
+                            Write-Host "Docker repository: $repository"
                             Write-Host "Publishing release image: $remoteVersion"
                             Write-Host "Publishing latest image: $remoteLatest"
 
@@ -2427,6 +2447,7 @@ exit /b %EXITCODE%
                                     -ErrorAction SilentlyContinue
                             }
                         '''
+                        }
                     }
                 }
             }
