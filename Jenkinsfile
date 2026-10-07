@@ -40,14 +40,14 @@ pipeline {
         booleanParam(
             name: 'RUN_ANSIBLE',
             defaultValue: false,
-            description: 'Week 13: validate the Ansible playbook inside a Docker-based Ansible environment. Disabled by default so Week 12 Docker CI/CD behavior is unchanged.'
+            description: 'Week 13: run Ansible syntax/check-mode validation and LIVE configuration management/deployment inside the Docker-based Ansible environment. Disabled by default so Week 12 Docker CI/CD behavior is unchanged.'
         )
 
         string(
             name: 'ANSIBLE_APP_DIR',
             defaultValue: '',
             trim: true,
-            description: 'Optional Week 13 Ansible application directory override. Leave blank to use the playbook default application directory.'
+            description: 'Optional Week 13 Ansible application directory override for standalone Linux execution. For Jenkins live execution, leave blank; the pipeline uses /workspace/ansible-live/leaveflow.'
         )
     }
 
@@ -473,7 +473,22 @@ pipeline {
         // path is untouched.
         // ============================================================
 
-        stage('Week 13 - Ansible Validation') {
+        // ============================================================
+        // WEEK 13 - ANSIBLE CONFIGURATION MANAGEMENT + LIVE EXECUTION
+        //
+        // Jenkins runs as Windows LocalSystem, so native WSL execution is
+        // intentionally avoided. Ansible runs in an official Docker CLI
+        // environment with access to the Docker Desktop Linux engine.
+        //
+        // This stage performs:
+        //   1. Ansible/collection installation
+        //   2. Syntax validation
+        //   3. Check-mode validation
+        //   4. LIVE Ansible provisioning/deployment
+        //   5. Live health verification
+        // ============================================================
+
+        stage('Week 13 - Ansible Configuration Management') {
             when {
                 expression {
                     params.RUN_ANSIBLE
@@ -482,95 +497,102 @@ pipeline {
 
             steps {
                 script {
-                    def ansibleAppDir = params.ANSIBLE_APP_DIR?.trim() ?: ''
-
-                    withEnv(["RUN_ANSIBLE_APP_DIR=${ansibleAppDir}"]) {
+                    withEnv([
+                        "RUN_ANSIBLE_APP_DIR=/workspace/ansible-live/leaveflow",
+                        "RUN_ANSIBLE_HEALTH_HOST=host.docker.internal"
+                    ]) {
                         powershell '''
-                    $ErrorActionPreference = "Stop"
+                            $ErrorActionPreference = "Stop"
 
-                    # Jenkins runs as LocalSystem on Windows. WSL cannot be
-                    # launched from the LocalSystem account, so Week 13 Ansible
-                    # validation runs inside the official Docker CLI image instead.
-                    $dockerExe = $env:DOCKER_EXE
-                    $dockerBinDir = $env:DOCKER_BIN_DIR
-                    $workspace = $env:WORKSPACE
-                    $ansibleImage = 'docker:29.8.0-cli'
+                            $dockerExe = $env:DOCKER_EXE
+                            $dockerBinDir = $env:DOCKER_BIN_DIR
+                            $workspace = $env:WORKSPACE
+                            $ansibleImage = 'docker:29.8.0-cli'
+                            $ansibleAppDir = '/workspace/ansible-live/leaveflow'
+                            $healthHost = 'host.docker.internal'
 
-                    Write-Host "=========================================="
-                    Write-Host "Week 13 Ansible Validation via Docker"
-                    Write-Host "=========================================="
+                            Write-Host "=========================================="
+                            Write-Host "Week 13 Ansible Configuration Management"
+                            Write-Host "=========================================="
+                            Write-Host "Docker image: $ansibleImage"
+                            Write-Host "Jenkins workspace: $workspace"
+                            Write-Host "Ansible-managed directory: $ansibleAppDir"
+                            Write-Host "Health host: $healthHost"
 
-                    if (-not (Test-Path $dockerExe)) {
-                        throw "Docker CLI not found: $dockerExe"
-                    }
+                            if (-not (Test-Path $dockerExe)) {
+                                throw "Docker CLI not found: $dockerExe"
+                            }
 
-                    if (-not ($env:PATH -split ';' | Where-Object { $_ -eq $dockerBinDir })) {
-                        $env:PATH = "$dockerBinDir;$env:PATH"
-                    }
+                            if (-not ($env:PATH -split ';' | Where-Object { $_ -eq $dockerBinDir })) {
+                                $env:PATH = "$dockerBinDir;$env:PATH"
+                            }
 
-                    & $dockerExe --version
-                    if ($LASTEXITCODE -ne 0) {
-                        throw 'Docker CLI verification failed.'
-                    }
+                            & $dockerExe --version
+                            if ($LASTEXITCODE -ne 0) {
+                                throw 'Docker CLI verification failed.'
+                            }
 
-                    Write-Host "Docker image: $ansibleImage"
-                    Write-Host "Jenkins workspace: $workspace"
-
-                    # The validation container performs syntax/check-mode validation only.
-                    # It does not use WSL and does not perform the live Ansible deployment.
-                    # The Jenkins workspace is mounted so Ansible reads this build's files.
-                    $command = @'
+                            # The Ansible runner reaches Docker Desktop's Linux
+                            # engine through the standard Unix Docker socket.
+                            # The Jenkins workspace is mounted so managed
+                            # configuration state remains visible to Jenkins.
+                            $command = @'
 set -eu
-apk add --no-cache python3 py3-pip openssl
+echo "=== Install Ansible prerequisites ==="
+apk add --no-cache python3 py3-pip openssl curl
+echo "=== Create Ansible virtual environment ==="
 python3 -m venv /opt/ansible-venv
-/opt/ansible-venv/bin/pip install --no-cache-dir ansible-core==2.21.4
+echo "=== Install Ansible and Docker SDK ==="
+/opt/ansible-venv/bin/pip install --no-cache-dir ansible-core==2.21.4 docker==7.2.0
+echo "=== Verify Docker engine socket ==="
+docker info --format '{{.ServerVersion}}'
+docker compose version
+echo "=== Install Ansible collection ==="
 /opt/ansible-venv/bin/ansible-galaxy collection install -r /workspace/ansible/requirements.yml
-/opt/ansible-venv/bin/ansible-playbook -i /workspace/ansible/inventory.ini /workspace/ansible/site.yml --syntax-check
-
-if [ -n "${LEAVEFLOW_ANSIBLE_APP_DIR:-}" ]; then
-    /opt/ansible-venv/bin/ansible-playbook \
-        -i /workspace/ansible/inventory.ini \
-        /workspace/ansible/site.yml \
-        --check \
-        -e "app_dir=${LEAVEFLOW_ANSIBLE_APP_DIR}"
-else
-    /opt/ansible-venv/bin/ansible-playbook \
-        -i /workspace/ansible/inventory.ini \
-        /workspace/ansible/site.yml \
-        --check
-fi
+echo "=== Ansible version ==="
+/opt/ansible-venv/bin/ansible-playbook --version
+echo "=== Collection verification ==="
+/opt/ansible-venv/bin/ansible-galaxy collection list | grep -A2 'community.docker' || true
+echo "=== Syntax check ==="
+/opt/ansible-venv/bin/ansible-playbook -i /workspace/ansible/inventory.ini /workspace/ansible/site.yml -e "app_dir=${RUN_ANSIBLE_APP_DIR}" -e "health_host=${RUN_ANSIBLE_HEALTH_HOST}" -e "release_version=1.0.${LEAVEFLOW_BUILD_NUMBER}" --syntax-check
+echo "=== Check mode ==="
+/opt/ansible-venv/bin/ansible-playbook -i /workspace/ansible/inventory.ini /workspace/ansible/site.yml -e "app_dir=${RUN_ANSIBLE_APP_DIR}" -e "health_host=${RUN_ANSIBLE_HEALTH_HOST}" -e "release_version=1.0.${LEAVEFLOW_BUILD_NUMBER}" --check
+echo "=== LIVE Ansible execution ==="
+/opt/ansible-venv/bin/ansible-playbook -i /workspace/ansible/inventory.ini /workspace/ansible/site.yml -e "app_dir=${RUN_ANSIBLE_APP_DIR}" -e "health_host=${RUN_ANSIBLE_HEALTH_HOST}" -e "release_version=1.0.${LEAVEFLOW_BUILD_NUMBER}"
+echo "=== Post-deployment health verification ==="
+curl -fsS --max-time 20 "http://${RUN_ANSIBLE_HEALTH_HOST}:8000/health"
+echo
+echo "=== Ansible-managed release marker ==="
+cat "${RUN_ANSIBLE_APP_DIR}/RELEASE"
 '@
 
-                    $ansibleAppDir = $env:RUN_ANSIBLE_APP_DIR
+                            $dockerArgs = @(
+                                'run',
+                                '--rm',
+                                '--pull', 'missing',
+                                '--env', "RUN_ANSIBLE_APP_DIR=$ansibleAppDir",
+                                '--env', "RUN_ANSIBLE_HEALTH_HOST=$healthHost",
+                                '--env', "LEAVEFLOW_BUILD_NUMBER=$env:BUILD_NUMBER",
+                                '--env', 'DOCKER_HOST=unix:///var/run/docker.sock',
+                                '--mount', "type=bind,source=$workspace,target=/workspace",
+                                '--mount', 'type=bind,source=/var/run/docker.sock.raw,target=/var/run/docker.sock',
+                                '--entrypoint', 'sh',
+                                $ansibleImage,
+                                '-c', $command
+                            )
 
-                    $dockerArgs = @(
-                        'run',
-                        '--rm',
-                        '--pull', 'missing',
-                        '--env', "LEAVEFLOW_ANSIBLE_APP_DIR=$ansibleAppDir",
-                        '--env', "LEAVEFLOW_APP_VERSION=1.0.$env:BUILD_NUMBER",
-                        '--mount', "type=bind,source=$workspace,target=/workspace",
-                        '--entrypoint', 'sh',
-                        $ansibleImage,
-                        '-c', $command
-                    )
+                            Write-Host "Starting live Ansible configuration-management runner..."
+                            & $dockerExe @dockerArgs
+                            if ($LASTEXITCODE -ne 0) {
+                                throw 'Live Ansible configuration-management execution failed.'
+                            }
 
-                    & $dockerExe @dockerArgs
-                    if ($LASTEXITCODE -ne 0) {
-                        throw 'Ansible Docker validation container failed.'
-                    }
-
-                    Write-Host "Week 13 Ansible syntax and check-mode validation succeeded inside Docker."
+                            Write-Host "Week 13 Ansible configuration management and live deployment succeeded."
                         '''
                     }
                 }
             }
         }
-
-
-        // ============================================================
-        // WEEK 12 - DOCKER RELEASE METADATA
-        // ============================================================
 
         stage('Prepare Docker Release Metadata') {
             when {
@@ -2381,6 +2403,22 @@ exit /b %EXITCODE%
                             Write-Host "Docker Hub username: $dockerUsername"
                             Write-Host "Docker secret successfully bound."
                             Write-Host "Docker secret length: $($dockerPassword.Length)"
+
+                            # Jenkins is running Windows PowerShell/.NET Framework on
+                            # the Docker Desktop agent. Use ComputeHash() rather than
+                            # SHA256.HashData(), which is unavailable on older .NET.
+                            # The PAT itself is never written to the build log.
+                            $sha256 = [System.Security.Cryptography.SHA256]::Create()
+                            try {
+                                $secretBytes = [System.Text.Encoding]::UTF8.GetBytes($dockerPassword)
+                                $secretHash = $sha256.ComputeHash($secretBytes)
+                                $secretFingerprint = [System.BitConverter]::ToString($secretHash).Replace('-', '').ToLowerInvariant()
+                            }
+                            finally {
+                                $sha256.Dispose()
+                            }
+
+                            Write-Host "Docker credential SHA-256: $secretFingerprint"
                             Write-Host "Docker registry: $registry"
                             Write-Host "Docker repository: $repository"
                             Write-Host "Publishing release image: $remoteVersion"
@@ -2402,37 +2440,49 @@ exit /b %EXITCODE%
                             $env:DOCKER_CONFIG = $tempDockerConfig
 
                             try {
-                                Write-Host "Preparing isolated Docker authentication config..."
+                                Write-Host "Authenticating to Docker registry..."
 
-                                # Do not invoke `docker login` here. Manual login works with
-                                # the same PAT, while the Jenkins agent's docker login path
-                                # returns HTTP 401. Instead, create the standard Docker
-                                # auths entry directly in a temporary client configuration.
-                                # The PAT is never written to the Jenkins console.
-                                $authBytes = [System.Text.Encoding]::UTF8.GetBytes(
-                                    "$dockerUsername`:$dockerPassword"
-                                )
-                                $authValue = [System.Convert]::ToBase64String($authBytes)
+                                # Invoke docker.exe through .NET so the PAT is written
+                                # directly to stdin. This avoids ambiguity from the
+                                # PowerShell native-command pipeline encoding.
+                                $psi = New-Object System.Diagnostics.ProcessStartInfo
+                                $psi.FileName = $dockerExe
+                                $psi.UseShellExecute = $false
+                                $psi.RedirectStandardInput = $true
+                                $psi.RedirectStandardOutput = $true
+                                $psi.RedirectStandardError = $true
+                                $psi.CreateNoWindow = $true
+                                $psi.Arguments = "login `"$registry`" --username `"$dockerUsername`" --password-stdin"
 
-                                $dockerConfigPath = Join-Path $tempDockerConfig 'config.json'
-                                $dockerConfigObject = @{
-                                    auths = @{
-                                        "https://index.docker.io/v1/" = @{
-                                            auth = $authValue
-                                        }
-                                    }
+                                $loginProcess = New-Object System.Diagnostics.Process
+                                $loginProcess.StartInfo = $psi
+
+                                if (-not $loginProcess.Start()) {
+                                    throw "Unable to start Docker login process."
                                 }
 
-                                $dockerConfigJson = $dockerConfigObject | ConvertTo-Json -Depth 5
-                                $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
-                                [System.IO.File]::WriteAllText(
-                                    $dockerConfigPath,
-                                    $dockerConfigJson,
-                                    $utf8NoBom
-                                )
+                                $loginProcess.StandardInput.Write($dockerPassword)
+                                $loginProcess.StandardInput.Write("`n")
+                                $loginProcess.StandardInput.Close()
 
-                                Write-Host "Docker authentication config prepared successfully."
-                                Write-Host "Docker login command bypassed; push will authenticate using the temporary config."
+                                $loginStdOut = $loginProcess.StandardOutput.ReadToEnd()
+                                $loginStdErr = $loginProcess.StandardError.ReadToEnd()
+                                $loginProcess.WaitForExit()
+                                $loginExitCode = $loginProcess.ExitCode
+                                $loginProcess.Dispose()
+
+                                if ($loginStdOut) {
+                                    Write-Host $loginStdOut.Trim()
+                                }
+
+                                if ($loginExitCode -ne 0) {
+                                    if ($loginStdErr) {
+                                        Write-Host $loginStdErr.Trim()
+                                    }
+                                    throw "Docker registry login failed with exit code $loginExitCode."
+                                }
+
+                                Write-Host "Docker registry login succeeded."
 
                                 & $dockerExe tag $releaseImage $remoteVersion
                                 if ($LASTEXITCODE -ne 0) {
@@ -2459,6 +2509,8 @@ exit /b %EXITCODE%
                                 Write-Host "Docker image publication successful."
                             }
                             finally {
+                                & $dockerExe logout $registry | Out-Null
+
                                 if ($previousDockerConfig) {
                                     $env:DOCKER_CONFIG = $previousDockerConfig
                                 }

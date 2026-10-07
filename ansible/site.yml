@@ -19,6 +19,34 @@
 
     app_port: 8000
 
+    # Docker-based Jenkins Ansible runner reaches the application through
+    # Docker Desktop's host gateway. Native Linux targets use loopback.
+    health_host: "{{ lookup('env', 'LEAVEFLOW_ANSIBLE_HEALTH_HOST') | default('127.0.0.1', true) }}"
+
+    configuration_spec:
+      logical_prerequisites:
+        - Python 3
+        - OpenSSL
+        - Docker Engine
+        - Docker CLI
+        - Docker Compose v2
+      users:
+        - Ansible execution account with Docker engine access
+      managed_directories:
+        - "{{ app_dir }}"
+        - "{{ app_dir }}/uploads"
+        - "{{ secret_dir }}"
+      managed_files:
+        - "{{ app_dir }}/Dockerfile"
+        - "{{ app_dir }}/docker-compose.yml"
+        - "{{ app_dir }}/requirements.txt"
+        - "{{ app_dir }}/.env.example"
+        - "{{ app_dir }}/RELEASE"
+      service: Docker Engine / Docker Desktop Linux engine
+      ports:
+        - 8000
+        - 5432
+
     # Resolve Docker from the interactive WSL environment once.
     # Ansible's module PATH can be more restrictive than the user's shell PATH.
     docker_cli: "{{ lookup('ansible.builtin.pipe', 'command -v docker') | trim }}"
@@ -71,6 +99,16 @@
       check_mode: false
 
   tasks:
+    - name: Display Week 13 configuration specification
+      ansible.builtin.debug:
+        msg:
+          prerequisites: "{{ configuration_spec.logical_prerequisites }}"
+          users: "{{ configuration_spec.users }}"
+          managed_directories: "{{ configuration_spec.managed_directories }}"
+          managed_files: "{{ configuration_spec.managed_files }}"
+          service: "{{ configuration_spec.service }}"
+          ports: "{{ configuration_spec.ports }}"
+
     - name: Create application directory
       ansible.builtin.file:
         path: "{{ app_dir }}"
@@ -210,7 +248,7 @@
     - name: Wait for application health
       when: not ansible_check_mode
       ansible.builtin.uri:
-        url: "http://127.0.0.1:{{ app_port }}/health"
+        url: "http://{{ health_host }}:{{ app_port }}/health"
         method: GET
         status_code: 200
         return_content: true
@@ -248,5 +286,6 @@
           - "Compose: {{ compose_version.stdout }}"
           - "OpenSSL: {{ openssl_version.stdout }}"
           - "Compose project: {{ compose_project_name }}"
-          - "Health endpoint: http://127.0.0.1:{{ app_port }}/health"
+          - "Health endpoint: http://{{ health_host }}:{{ app_port }}/health"
           - "Application directory exists: {{ app_dir_state.stat.exists }}"
+          - "Ansible live execution: completed"
