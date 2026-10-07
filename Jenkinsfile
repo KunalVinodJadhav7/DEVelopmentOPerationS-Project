@@ -2381,22 +2381,6 @@ exit /b %EXITCODE%
                             Write-Host "Docker Hub username: $dockerUsername"
                             Write-Host "Docker secret successfully bound."
                             Write-Host "Docker secret length: $($dockerPassword.Length)"
-
-                            # Jenkins is running Windows PowerShell/.NET Framework on
-                            # the Docker Desktop agent. Use ComputeHash() rather than
-                            # SHA256.HashData(), which is unavailable on older .NET.
-                            # The PAT itself is never written to the build log.
-                            $sha256 = [System.Security.Cryptography.SHA256]::Create()
-                            try {
-                                $secretBytes = [System.Text.Encoding]::UTF8.GetBytes($dockerPassword)
-                                $secretHash = $sha256.ComputeHash($secretBytes)
-                                $secretFingerprint = [System.BitConverter]::ToString($secretHash).Replace('-', '').ToLowerInvariant()
-                            }
-                            finally {
-                                $sha256.Dispose()
-                            }
-
-                            Write-Host "Docker credential SHA-256: $secretFingerprint"
                             Write-Host "Docker registry: $registry"
                             Write-Host "Docker repository: $repository"
                             Write-Host "Publishing release image: $remoteVersion"
@@ -2418,49 +2402,37 @@ exit /b %EXITCODE%
                             $env:DOCKER_CONFIG = $tempDockerConfig
 
                             try {
-                                Write-Host "Authenticating to Docker registry..."
+                                Write-Host "Preparing isolated Docker authentication config..."
 
-                                # Invoke docker.exe through .NET so the PAT is written
-                                # directly to stdin. This avoids ambiguity from the
-                                # PowerShell native-command pipeline encoding.
-                                $psi = New-Object System.Diagnostics.ProcessStartInfo
-                                $psi.FileName = $dockerExe
-                                $psi.UseShellExecute = $false
-                                $psi.RedirectStandardInput = $true
-                                $psi.RedirectStandardOutput = $true
-                                $psi.RedirectStandardError = $true
-                                $psi.CreateNoWindow = $true
-                                $psi.Arguments = "login `"$registry`" --username `"$dockerUsername`" --password-stdin"
+                                # Do not invoke `docker login` here. Manual login works with
+                                # the same PAT, while the Jenkins agent's docker login path
+                                # returns HTTP 401. Instead, create the standard Docker
+                                # auths entry directly in a temporary client configuration.
+                                # The PAT is never written to the Jenkins console.
+                                $authBytes = [System.Text.Encoding]::UTF8.GetBytes(
+                                    "$dockerUsername`:$dockerPassword"
+                                )
+                                $authValue = [System.Convert]::ToBase64String($authBytes)
 
-                                $loginProcess = New-Object System.Diagnostics.Process
-                                $loginProcess.StartInfo = $psi
-
-                                if (-not $loginProcess.Start()) {
-                                    throw "Unable to start Docker login process."
-                                }
-
-                                $loginProcess.StandardInput.Write($dockerPassword)
-                                $loginProcess.StandardInput.Write("`n")
-                                $loginProcess.StandardInput.Close()
-
-                                $loginStdOut = $loginProcess.StandardOutput.ReadToEnd()
-                                $loginStdErr = $loginProcess.StandardError.ReadToEnd()
-                                $loginProcess.WaitForExit()
-                                $loginExitCode = $loginProcess.ExitCode
-                                $loginProcess.Dispose()
-
-                                if ($loginStdOut) {
-                                    Write-Host $loginStdOut.Trim()
-                                }
-
-                                if ($loginExitCode -ne 0) {
-                                    if ($loginStdErr) {
-                                        Write-Host $loginStdErr.Trim()
+                                $dockerConfigPath = Join-Path $tempDockerConfig 'config.json'
+                                $dockerConfigObject = @{
+                                    auths = @{
+                                        "https://index.docker.io/v1/" = @{
+                                            auth = $authValue
+                                        }
                                     }
-                                    throw "Docker registry login failed with exit code $loginExitCode."
                                 }
 
-                                Write-Host "Docker registry login succeeded."
+                                $dockerConfigJson = $dockerConfigObject | ConvertTo-Json -Depth 5
+                                $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+                                [System.IO.File]::WriteAllText(
+                                    $dockerConfigPath,
+                                    $dockerConfigJson,
+                                    $utf8NoBom
+                                )
+
+                                Write-Host "Docker authentication config prepared successfully."
+                                Write-Host "Docker login command bypassed; push will authenticate using the temporary config."
 
                                 & $dockerExe tag $releaseImage $remoteVersion
                                 if ($LASTEXITCODE -ne 0) {
@@ -2487,8 +2459,6 @@ exit /b %EXITCODE%
                                 Write-Host "Docker image publication successful."
                             }
                             finally {
-                                & $dockerExe logout $registry | Out-Null
-
                                 if ($previousDockerConfig) {
                                     $env:DOCKER_CONFIG = $previousDockerConfig
                                 }
