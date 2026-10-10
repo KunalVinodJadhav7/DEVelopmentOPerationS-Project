@@ -1783,6 +1783,10 @@ cat "${RUN_ANSIBLE_APP_DIR}/RELEASE"
                                 '--env', "LEAVEFLOW_DOCKER_HOST_APP_DIR=$dockerHostAppDir",
                                 '--env', 'DOCKER_HOST=unix:///var/run/docker.sock',
                                 '--mount', "type=bind,source=$workspace,target=/workspace",
+                                # Make the Docker Desktop daemon-visible workspace path available
+                                # inside the Compose client too. Compose validates file-backed
+                                # secrets locally before asking the daemon to create containers.
+                                '--mount', "type=bind,source=$workspace,target=$dockerHostWorkspace",
                                 '--mount', 'type=bind,source=/var/run/docker.sock.raw,target=/var/run/docker.sock',
                                 '--entrypoint', 'sh',
                                 $ansibleImage,

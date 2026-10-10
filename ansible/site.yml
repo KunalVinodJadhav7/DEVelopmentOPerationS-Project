@@ -25,6 +25,10 @@
     # Docker-based Jenkins Ansible runner reaches the application through
     # Docker Desktop's host gateway. Native Linux targets use loopback.
     health_host: "{{ lookup('env', 'LEAVEFLOW_ANSIBLE_HEALTH_HOST') | default('127.0.0.1', true) }}"
+    # In the Jenkins Docker Desktop runner, this path is the shared workspace
+    # mounted again at the daemon-visible Linux VM path so Compose can stat
+    # bind sources in the same path namespace used by Docker Engine.
+    docker_host_app_dir: "{{ lookup('env', 'LEAVEFLOW_DOCKER_HOST_APP_DIR') | default('', true) }}"
 
     configuration_spec:
       logical_prerequisites:
@@ -170,6 +174,27 @@
       # exists only in the planned changes; the live run enforces 0600.
       when: not ansible_check_mode
 
+    - name: Verify runtime secret at the Docker Desktop host path
+      ansible.builtin.stat:
+        path: "{{ docker_host_app_dir }}/secrets/leaveflow_secret_key.txt"
+      register: docker_host_secret_state
+      changed_when: false
+      when:
+        - not ansible_check_mode
+        - docker_host_app_dir | length > 0
+
+    - name: Require Docker Desktop host secret to be a regular file
+      ansible.builtin.assert:
+        that:
+          - docker_host_secret_state.stat.exists
+          - docker_host_secret_state.stat.isreg
+        fail_msg: >-
+          The runtime secret is not visible as a regular file at the Docker Desktop
+          host path. Check the shared workspace bind mount before Compose deployment.
+      when:
+        - not ansible_check_mode
+        - docker_host_app_dir | length > 0
+
     - name: Copy Dockerfile
       ansible.builtin.copy:
         src: "{{ playbook_dir }}/../Dockerfile"
@@ -258,6 +283,7 @@
       environment:
         LEAVEFLOW_APP_IMAGE: "leave-approval-system:{{ release_version }}"
         LEAVEFLOW_APP_VERSION: "{{ release_version }}"
+        LEAVEFLOW_DOCKER_HOST_APP_DIR: "{{ docker_host_app_dir }}"
 
     - name: Verify Compose application status
       when: not ansible_check_mode
