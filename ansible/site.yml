@@ -165,7 +165,10 @@
         path: "{{ secret_file }}"
         state: file
         mode: '0600'
-      when: secret_state.stat.exists or source_secret_state.stat.exists or not ansible_check_mode
+      # In check mode, copy/shell tasks are simulated and do not create the
+      # destination secret. Do not ask the file module to chmod a file that
+      # exists only in the planned changes; the live run enforces 0600.
+      when: not ansible_check_mode
 
     - name: Copy Dockerfile
       ansible.builtin.copy:
