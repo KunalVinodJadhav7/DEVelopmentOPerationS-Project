@@ -1682,7 +1682,27 @@ exit /b %EXITCODE%
                             if (-not (Test-Path -LiteralPath $ansibleLiveAppDirectory -PathType Container)) {
                                 throw "Could not prepare the Ansible deployment directory on the Jenkins workspace: $ansibleLiveAppDirectory"
                             }
-                            Write-Host "Prepared host workspace directory for Ansible: $ansibleLiveAppDirectory"
+
+                            # The Linux runner sees this workspace through a Docker Desktop
+                            # bind mount. The failing mkdir is specifically the final
+                            # secrets child, so create that child on the Windows source
+                            # filesystem before starting the runner. Preserve a conflicting
+                            # file or reparse-point link rather than deleting it.
+                            $ansibleSecretDirectory = Join-Path $ansibleLiveAppDirectory 'secrets'
+                            $ansibleSecretItem = Get-Item -LiteralPath $ansibleSecretDirectory -Force -ErrorAction SilentlyContinue
+                            if ($null -ne $ansibleSecretItem -and (
+                                -not $ansibleSecretItem.PSIsContainer -or
+                                (($ansibleSecretItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0)
+                            )) {
+                                $conflictBackup = "${ansibleSecretDirectory}.conflict-$((Get-Date).ToString('yyyyMMdd-HHmmss-fff')).bak"
+                                Move-Item -LiteralPath $ansibleSecretDirectory -Destination $conflictBackup
+                                Write-Warning "Moved a conflicting object from the Ansible secret-directory path to: $conflictBackup"
+                            }
+                            New-Item -ItemType Directory -Force -Path $ansibleSecretDirectory | Out-Null
+                            if (-not (Test-Path -LiteralPath $ansibleSecretDirectory -PathType Container)) {
+                                throw "Could not prepare the Ansible secrets directory on the Jenkins workspace: $ansibleSecretDirectory"
+                            }
+                            Write-Host "Prepared host workspace directories for Ansible: $ansibleLiveAppDirectory and $ansibleSecretDirectory"
 
                             Write-Host "=========================================="
                             Write-Host "Week 14 Ansible Deployment and Verification"
@@ -1730,6 +1750,23 @@ set -eu
 ANSIBLE=/opt/ansible-venv/bin/ansible-playbook
 PLAYBOOK=/workspace/ansible/site.yml
 INVENTORY=/workspace/ansible/inventory.ini
+
+ echo "=== Verify Windows-prepared Ansible directories through the Linux bind mount ==="
+for path in /workspace/ansible-live /workspace/ansible-live/leaveflow /workspace/ansible-live/leaveflow/secrets; do
+    if [ ! -d "$path" ]; then
+        echo "ERROR: Windows-prepared directory is not visible as a directory in the Ansible runner: $path" >&2
+        ls -ld -- "$(dirname -- "$path")" "$path" 2>&1 || true
+        exit 1
+    fi
+done
+probe="/workspace/ansible-live/leaveflow/secrets/.jenkins-bind-mount-probe-$$"
+if ! (umask 077; : > "$probe"); then
+    echo "ERROR: Linux runner cannot create a test file in the Windows-prepared secrets directory." >&2
+    ls -ld -- /workspace/ansible-live /workspace/ansible-live/leaveflow /workspace/ansible-live/leaveflow/secrets 2>&1 || true
+    exit 1
+fi
+rm -f -- "$probe"
+echo "Windows-created directory hierarchy is visible and writable in the Linux bind mount."
 
  echo "=== Install Ansible prerequisites ==="
 apk add --no-cache python3 py3-pip openssl curl
@@ -1805,10 +1842,6 @@ cat "${RUN_ANSIBLE_APP_DIR}/RELEASE"
                                 '--env', "LEAVEFLOW_DOCKER_HOST_APP_DIR=$dockerHostAppDir",
                                 '--env', 'DOCKER_HOST=unix:///var/run/docker.sock',
                                 '--mount', "type=bind,source=$workspace,target=/workspace",
-                                # Make the Docker Desktop daemon-visible workspace path available
-                                # inside the Compose client too. Compose validates file-backed
-                                # secrets locally before asking the daemon to create containers.
-                                '--mount', "type=bind,source=$workspace,target=$dockerHostWorkspace",
                                 '--mount', 'type=bind,source=/var/run/docker.sock.raw,target=/var/run/docker.sock',
                                 '--entrypoint', 'sh',
                                 $ansibleImage,
