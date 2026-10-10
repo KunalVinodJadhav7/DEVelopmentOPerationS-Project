@@ -25,10 +25,6 @@
     # Docker-based Jenkins Ansible runner reaches the application through
     # Docker Desktop's host gateway. Native Linux targets use loopback.
     health_host: "{{ lookup('env', 'LEAVEFLOW_ANSIBLE_HEALTH_HOST') | default('127.0.0.1', true) }}"
-    # In the Jenkins Docker Desktop runner, this path is the shared workspace
-    # mounted again at the daemon-visible Linux VM path so Compose can stat
-    # bind sources in the same path namespace used by Docker Engine.
-    docker_host_app_dir: "{{ lookup('env', 'LEAVEFLOW_DOCKER_HOST_APP_DIR') | default('', true) }}"
 
     configuration_spec:
       logical_prerequisites:
@@ -174,26 +170,29 @@
       # exists only in the planned changes; the live run enforces 0600.
       when: not ansible_check_mode
 
-    - name: Verify runtime secret at the Docker Desktop host path
-      ansible.builtin.stat:
-        path: "{{ docker_host_app_dir }}/secrets/leaveflow_secret_key.txt"
-      register: docker_host_secret_state
+    - name: Check runtime secret length without displaying its value
+      when: not ansible_check_mode
+      ansible.builtin.command:
+        argv:
+          - python3
+          - -c
+          - >-
+            import pathlib, sys; value = pathlib.Path(sys.argv[1]).read_bytes().rstrip(b'\r\n'); sys.exit(0 if len(value) >= 32 else 1)
+          - "{{ secret_file }}"
+      register: runtime_secret_length_check
       changed_when: false
-      when:
-        - not ansible_check_mode
-        - docker_host_app_dir | length > 0
+      failed_when: false
 
-    - name: Require Docker Desktop host secret to be a regular file
+    - name: Require an application-compatible runtime secret
+      when: not ansible_check_mode
       ansible.builtin.assert:
         that:
-          - docker_host_secret_state.stat.exists
-          - docker_host_secret_state.stat.isreg
+          - runtime_secret_length_check.rc == 0
         fail_msg: >-
-          The runtime secret is not visible as a regular file at the Docker Desktop
-          host path. Check the shared workspace bind mount before Compose deployment.
-      when:
-        - not ansible_check_mode
-        - docker_host_app_dir | length > 0
+          The runtime secret is shorter than the 32-byte minimum enforced by
+          app/security.py. Update Jenkins credential 'leaveflow-secret-key' to
+          a strong random value of at least 32 bytes. The value is not printed.
+        success_msg: Runtime secret meets the application's minimum length.
 
     - name: Copy Dockerfile
       ansible.builtin.copy:
@@ -268,22 +267,57 @@
       loop_control:
         label: "{{ item.item }}"
 
-    - name: Deploy the Compose application
+    - name: Deploy the Compose application with startup diagnostics
       when: not ansible_check_mode
-      community.docker.docker_compose_v2:
-        docker_cli: "{{ docker_cli }}"
-        project_src: "{{ app_dir }}"
-        project_name: "{{ compose_project_name }}"
-        state: present
-        pull: missing
-        build: policy
-      # Pass release metadata directly to the Compose module subprocess. This
-      # prevents Compose from falling back to :latest when the Ansible runner's
-      # inherited environment differs from the Jenkins controller environment.
-      environment:
-        LEAVEFLOW_APP_IMAGE: "leave-approval-system:{{ release_version }}"
-        LEAVEFLOW_APP_VERSION: "{{ release_version }}"
-        LEAVEFLOW_DOCKER_HOST_APP_DIR: "{{ docker_host_app_dir }}"
+      block:
+        - name: Deploy the Compose application
+          community.docker.docker_compose_v2:
+            docker_cli: "{{ docker_cli }}"
+            project_src: "{{ app_dir }}"
+            project_name: "{{ compose_project_name }}"
+            state: present
+            pull: missing
+            build: policy
+          # Pass release metadata directly to the Compose module subprocess. This
+          # prevents Compose from falling back to :latest when the Ansible runner's
+          # inherited environment differs from the Jenkins controller environment.
+          environment:
+            LEAVEFLOW_APP_IMAGE: "leave-approval-system:{{ release_version }}"
+            LEAVEFLOW_APP_VERSION: "{{ release_version }}"
+      rescue:
+        - name: Capture application logs after Compose deployment failure
+          ansible.builtin.command:
+            argv:
+              - "{{ docker_cli }}"
+              - logs
+              - --tail
+              - "100"
+              - leaveflow-app
+          register: app_startup_logs
+          changed_when: false
+          failed_when: false
+
+        - name: Capture application container state after Compose deployment failure
+          community.docker.docker_container_info:
+            name: leaveflow-app
+          register: app_startup_info
+          failed_when: false
+
+        - name: Display sanitized application startup diagnostics
+          ansible.builtin.debug:
+            msg:
+              state: "{{ (app_startup_info.container | default({})).get('State', {}).get('Status', 'unavailable') }}"
+              exit_code: "{{ (app_startup_info.container | default({})).get('State', {}).get('ExitCode', 'unknown') }}"
+              container_error: "{{ (app_startup_info.container | default({})).get('State', {}).get('Error', '') }}"
+              logs: "{{ app_startup_logs.stdout | default('No stdout from docker logs.') }}"
+              log_stderr: "{{ app_startup_logs.stderr | default('') }}"
+
+        - name: Fail after displaying application startup diagnostics
+          ansible.builtin.fail:
+            msg: >-
+              Compose deployment failed. Review the application startup diagnostics
+              printed above; the original Compose failure was
+              {{ ansible_failed_result.msg | default('not available') }}.
 
     - name: Verify Compose application status
       when: not ansible_check_mode
