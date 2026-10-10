@@ -150,50 +150,50 @@
         - .env.example
 
     - name: Merge application source directories safely on the shared workspace mount
-      ansible.builtin.shell: |
-        set -eu
-        src={{ (playbook_dir ~ '/../' ~ item) | quote }}
-        dest={{ (app_dir ~ '/' ~ item) | quote }}
+      ansible.builtin.shell:
+        cmd: |
+          set -eu
+          src={{ (playbook_dir ~ '/../' ~ item) | quote }}
+          dest={{ (app_dir ~ '/' ~ item) | quote }}
 
-        if [ ! -d "$src" ]; then
-          echo "ERROR: source directory is missing: $src" >&2
-          exit 1
-        fi
+          if [ ! -d "$src" ]; then
+            echo "ERROR: source directory is missing: $src" >&2
+            exit 1
+          fi
 
-        # Do not replace a file or symlink with a directory silently.
-        # Those are deployment conflicts, not empty directories to repair.
-        if [ -L "$dest" ] || { [ -e "$dest" ] && [ ! -d "$dest" ]; }; then
-          echo "ERROR: destination exists but is not a real directory: $dest" >&2
-          ls -ld -- "$dest" >&2 || true
-          exit 1
-        fi
+          # Do not replace a file or symlink with a directory silently.
+          # Those are deployment conflicts, not empty directories to repair.
+          if [ -L "$dest" ] || { [ -e "$dest" ] && [ ! -d "$dest" ]; }; then
+            echo "ERROR: destination exists but is not a real directory: $dest" >&2
+            ls -ld -- "$dest" >&2 || true
+            exit 1
+          fi
 
-        # Jenkins pre-creates these destinations on Windows before the workspace
-        # is bind-mounted into the Linux runner. Avoid a redundant Linux mkdir on
-        # Docker Desktop Windows mounts, where directory creation can fail even
-        # though the parent exists. Keep mkdir as a fallback for standalone Linux.
-        if [ ! -d "$dest" ]; then
-          mkdir -p -- "$dest"
-        fi
+          # Jenkins pre-creates these destinations on Windows before the workspace
+          # is bind-mounted into the Linux runner. Avoid a redundant Linux mkdir on
+          # Docker Desktop Windows mounts, where directory creation can fail even
+          # though the parent exists. Keep mkdir as a fallback for standalone Linux.
+          if [ ! -d "$dest" ]; then
+            mkdir -p -- "$dest"
+          fi
 
-        # Ignore destination-only files (matching the previous copy task's
-        # non-pruning behavior), but copy the tree when a source file or
-        # directory is missing or content differs. This keeps repeat runs
-        # idempotent instead of overwriting identical files every time.
-        diff_output="$(diff -qr -- "$src" "$dest" 2>&1 || true)"
-        source_differences="$(printf '%s\n' "$diff_output" | awk -v destination="$dest" '
-          index($0, "Only in " destination "/") == 1 { next }
-          index($0, "Only in " destination ":") == 1 { next }
-          NF { print }
-        ')"
+          # Ignore destination-only files (matching the previous copy task's
+          # non-pruning behavior), but copy the tree when a source file or
+          # directory is missing or content differs. This keeps repeat runs
+          # idempotent instead of overwriting identical files every time.
+          diff_output="$(diff -qr -- "$src" "$dest" 2>&1 || true)"
+          source_differences="$(printf '%s\n' "$diff_output" | awk -v destination="$dest" '
+            index($0, "Only in " destination "/") == 1 { next }
+            index($0, "Only in " destination ":") == 1 { next }
+            NF { print }
+          ')"
 
-        if [ -n "$source_differences" ]; then
-          cp -Rp -- "$src/." "$dest/"
-          printf 'CHANGED: merged source directory %s into %s\n' "$src" "$dest"
-        else
-          printf 'OK: source directory already matches destination: %s\n' "$dest"
-        fi
-      args:
+          if [ -n "$source_differences" ]; then
+            cp -Rp -- "$src/." "$dest/"
+            printf 'CHANGED: merged source directory %s into %s\n' "$src" "$dest"
+          else
+            printf 'OK: source directory already matches destination: %s\n' "$dest"
+          fi
         executable: /bin/sh
       loop:
         - app
