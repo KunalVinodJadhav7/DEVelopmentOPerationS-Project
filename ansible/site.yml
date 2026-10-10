@@ -157,45 +157,65 @@
           and create the required directory.
       when: ansible_check_mode
 
-    - name: Ensure Compose secret path is a real directory
+    - name: Ensure Compose secret path and parent directories are real directories
       ansible.builtin.shell: |
         set -eu
+        app={{ app_dir | quote }}
         target={{ secret_dir | quote }}
+        app_parent="$(dirname -- "$app")"
         changed=0
 
-        # Always move a symlink itself aside, even if its target happens to be a
-        # directory. This avoids file-module EEXIST behavior on shared Windows mounts.
-        if [ -L "$target" ]; then
-          backup="${target}.conflict-backup-$(date +%s)-$$"
-          mv -- "$target" "$backup"
-          printf 'CHANGED: preserved existing symlink at %s\n' "$backup"
-          changed=1
-        elif [ -e "$target" ] && [ ! -d "$target" ]; then
-          backup="${target}.conflict-backup-$(date +%s)-$$"
-          mv -- "$target" "$backup"
-          printf 'CHANGED: preserved conflicting file at %s\n' "$backup"
-          changed=1
-        fi
+        ensure_real_directory() {
+          path="$1"
 
-        if [ ! -d "$target" ]; then
-          mkdir -p -- "$target"
-          printf 'CHANGED: created Compose secret directory %s\n' "$target"
-          changed=1
-        fi
+          # Preserve the conflicting object itself. A dangling symlink or a
+          # file in any parent component can make mkdir -p report ENOENT even
+          # when the final target is not present.
+          if [ -L "$path" ] || { [ -e "$path" ] && [ ! -d "$path" ]; }; then
+            backup="${path}.conflict-backup-$(date +%s)-$$"
+            if ! mv -- "$path" "$backup"; then
+              echo "ERROR: could not preserve conflicting path: $path" >&2
+              return 1
+            fi
+            printf 'CHANGED: preserved conflicting path at %s\n' "$backup"
+            changed=1
+          fi
+
+          if [ ! -d "$path" ]; then
+            if ! mkdir -p -- "$path"; then
+              echo "ERROR: could not create directory: $path" >&2
+              echo "Path diagnostics (parent and target):" >&2
+              ls -ld -- "$(dirname -- "$path")" "$path" 2>&1 || true
+              return 1
+            fi
+            printf 'CHANGED: created directory %s\n' "$path"
+            changed=1
+          fi
+
+          if [ ! -d "$path" ]; then
+            echo "ERROR: path is still not a directory: $path" >&2
+            return 1
+          fi
+        }
+
+        # Ensure every component managed by this deployment is usable before
+        # creating the Compose file-backed secret below it.
+        ensure_real_directory "$app_parent"
+        ensure_real_directory "$app"
+        ensure_real_directory "$target"
 
         current_mode="$(stat -c '%a' "$target" 2>/dev/null || true)"
         if [ "$current_mode" != '700' ]; then
-          chmod 0700 "$target"
+          if ! chmod 0700 "$target"; then
+            echo "ERROR: could not enforce mode 0700 on $target" >&2
+            exit 1
+          fi
           printf 'CHANGED: enforced mode 0700 on %s\n' "$target"
           changed=1
         fi
 
-        if [ ! -d "$target" ]; then
-          echo "ERROR: Compose secret path is still not a directory: $target" >&2
-          exit 1
-        fi
         if [ "$changed" -eq 0 ]; then
-          printf 'OK: Compose secret directory already exists with mode 0700\n'
+          printf 'OK: application parent, app directory, and Compose secret directory are real directories; secret directory mode is 0700\n'
         fi
       args:
         executable: /bin/sh
