@@ -1741,6 +1741,33 @@ set -eu
 ANSIBLE=/opt/ansible-venv/bin/ansible-playbook
 PLAYBOOK=/workspace/ansible/site.yml
 INVENTORY=/workspace/ansible/inventory.ini
+echo "=== Diagnose Ansible deployment directory ==="
+pwd
+id
+
+for path in \
+    /workspace \
+    /workspace/ansible-live \
+    /workspace/ansible-live/leaveflow \
+    /workspace/ansible-live/leaveflow/nginx
+do
+    if [ -L "$path" ]; then
+        echo "SYMLINK: $path"
+        ls -ld -- "$path" || true
+        readlink -- "$path" || true
+    elif [ -d "$path" ]; then
+        echo "DIRECTORY: $path"
+        ls -ld -- "$path"
+    elif [ -e "$path" ]; then
+        echo "OTHER FILE: $path"
+        ls -ld -- "$path"
+    else
+        echo "MISSING: $path"
+    fi
+done
+
+echo "=== Filesystem information ==="
+df -h /workspace
 
  echo "=== Verify Windows-prepared Ansible app directory through the Linux bind mount ==="
 for path in /workspace/ansible-live /workspace/ansible-live/leaveflow; do
