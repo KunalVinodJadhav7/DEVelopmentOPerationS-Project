@@ -558,7 +558,8 @@ Docker Registry Publishing: ${params.PUBLISH_DOCKER_IMAGE}
                         sql/**/*,
                         docker/**/*,
                         nginx/**/*,
-                        scripts/**/*
+                        scripts/**/*,
+                        ansible/**/*
                     """,
                     useDefaultExcludes: false
                 )
