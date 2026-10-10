@@ -1662,6 +1662,28 @@ exit /b %EXITCODE%
                             $dockerHostWorkspace = "/run/desktop/mnt/host/$workspaceDrive/$workspaceRelative"
                             $dockerHostAppDir = "$dockerHostWorkspace/ansible-live/leaveflow"
 
+                            # The runner's /workspace path is a bind mount of this Windows
+                            # workspace. Ensure ansible-live is a directory on the source
+                            # filesystem before the Linux Ansible file module tries to
+                            # create /workspace/ansible-live/leaveflow. Preserve an unexpected
+                            # file at this reserved path instead of deleting it silently.
+                            $ansibleLiveRoot = Join-Path $workspace 'ansible-live'
+                            $ansibleLiveAppDirectory = Join-Path $ansibleLiveRoot 'leaveflow'
+                            if (Test-Path -LiteralPath $ansibleLiveRoot) {
+                                $ansibleLiveRootItem = Get-Item -LiteralPath $ansibleLiveRoot -Force
+                                if (-not $ansibleLiveRootItem.PSIsContainer) {
+                                    $conflictBackup = "${ansibleLiveRoot}.file-conflict-$((Get-Date).ToString('yyyyMMdd-HHmmss-fff')).bak"
+                                    Move-Item -LiteralPath $ansibleLiveRoot -Destination $conflictBackup
+                                    Write-Warning "Moved a conflicting file from the reserved Ansible directory path to: $conflictBackup"
+                                }
+                            }
+                            New-Item -ItemType Directory -Force -Path $ansibleLiveRoot | Out-Null
+                            New-Item -ItemType Directory -Force -Path $ansibleLiveAppDirectory | Out-Null
+                            if (-not (Test-Path -LiteralPath $ansibleLiveAppDirectory -PathType Container)) {
+                                throw "Could not prepare the Ansible deployment directory on the Jenkins workspace: $ansibleLiveAppDirectory"
+                            }
+                            Write-Host "Prepared host workspace directory for Ansible: $ansibleLiveAppDirectory"
+
                             Write-Host "=========================================="
                             Write-Host "Week 14 Ansible Deployment and Verification"
                             Write-Host "=========================================="
