@@ -25,6 +25,10 @@
     # Docker-based Jenkins Ansible runner reaches the application through
     # Docker Desktop's host gateway. Native Linux targets use loopback.
     health_host: "{{ lookup('env', 'LEAVEFLOW_ANSIBLE_HEALTH_HOST') | default('127.0.0.1', true) }}"
+    # In the Jenkins Docker Desktop runner, this path is the shared workspace
+    # mounted again at the daemon-visible Linux VM path so Compose can stat
+    # bind sources in the same path namespace used by Docker Engine.
+    docker_host_app_dir: "{{ lookup('env', 'LEAVEFLOW_DOCKER_HOST_APP_DIR') | default('', true) }}"
 
     configuration_spec:
       logical_prerequisites:
@@ -140,7 +144,7 @@
       ansible.builtin.copy:
         src: "{{ source_secret_file }}"
         dest: "{{ secret_file }}"
-        mode: '0600'
+        mode: '0444'
       when: source_secret_state.stat.exists
 
     - name: Check whether runtime secret already exists
@@ -164,10 +168,13 @@
       ansible.builtin.file:
         path: "{{ secret_file }}"
         state: file
-        mode: '0600'
+        mode: '0444'
       # In check mode, copy/shell tasks are simulated and do not create the
       # destination secret. Do not ask the file module to chmod a file that
-      # exists only in the planned changes; the live run enforces 0600.
+      # exists only in the planned changes. Compose file-backed secrets are
+      # bind mounts: Compose does not remap uid/gid/mode for this source type.
+      # The non-root appuser must therefore be able to read the source file.
+      # Keep the parent directory restricted and protect its Windows ACLs.
       when: not ansible_check_mode
 
     - name: Check runtime secret length without displaying its value
@@ -193,6 +200,27 @@
           app/security.py. Update Jenkins credential 'leaveflow-secret-key' to
           a strong random value of at least 32 bytes. The value is not printed.
         success_msg: Runtime secret meets the application's minimum length.
+
+    - name: Verify runtime secret at the Docker Desktop host path
+      ansible.builtin.stat:
+        path: "{{ docker_host_app_dir }}/secrets/leaveflow_secret_key.txt"
+      register: docker_host_secret_state
+      changed_when: false
+      when:
+        - not ansible_check_mode
+        - docker_host_app_dir | length > 0
+
+    - name: Require Docker Desktop host secret to be a regular file
+      ansible.builtin.assert:
+        that:
+          - docker_host_secret_state.stat.exists
+          - docker_host_secret_state.stat.isreg
+        fail_msg: >-
+          The runtime secret is not visible as a regular file at the Docker Desktop
+          host path. Check the shared workspace bind mount before Compose deployment.
+      when:
+        - not ansible_check_mode
+        - docker_host_app_dir | length > 0
 
     - name: Copy Dockerfile
       ansible.builtin.copy:
@@ -278,12 +306,13 @@
             state: present
             pull: missing
             build: policy
-          # Pass release metadata directly to the Compose module subprocess. This
-          # prevents Compose from falling back to :latest when the Ansible runner's
-          # inherited environment differs from the Jenkins controller environment.
+          # Pass release metadata and the Docker Desktop host path to Compose.
+          # Keep these environment values aligned with Jenkins' shared workspace
+          # mount so file-backed secrets are resolved in the daemon-visible path.
           environment:
             LEAVEFLOW_APP_IMAGE: "leave-approval-system:{{ release_version }}"
             LEAVEFLOW_APP_VERSION: "{{ release_version }}"
+            LEAVEFLOW_DOCKER_HOST_APP_DIR: "{{ docker_host_app_dir }}"
       rescue:
         - name: Capture application logs after Compose deployment failure
           ansible.builtin.command:
@@ -303,7 +332,7 @@
           register: app_startup_info
           failed_when: false
 
-        - name: Display sanitized application startup diagnostics
+        - name: Display application startup diagnostics
           ansible.builtin.debug:
             msg:
               state: "{{ (app_startup_info.container | default({})).get('State', {}).get('Status', 'unavailable') }}"

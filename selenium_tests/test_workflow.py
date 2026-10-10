@@ -1,6 +1,7 @@
 import os
 import unittest
 import uuid
+from datetime import date, timedelta
 from pathlib import Path
 
 from selenium import webdriver
@@ -8,7 +9,18 @@ from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait, Select
-from selenium.common.exceptions import TimeoutException
+from selenium.common.exceptions import (
+    NoSuchElementException,
+    StaleElementReferenceException,
+    TimeoutException,
+)
+
+
+def _future_leave_dates():
+    """Return a start/end date pair that remains valid on future CI runs."""
+    start = date.today() + timedelta(days=7)
+    end = start + timedelta(days=2)
+    return start.isoformat(), end.isoformat()
 
 
 # Week 9 browser target.
@@ -326,11 +338,32 @@ class LeaveApprovalWorkflowTest(unittest.TestCase):
         ).click()
 
         def login_finished(driver):
+            # A matching URL only means navigation started; the SPA can still
+            # be rebuilding the page. Wait for rendered controls as well.
             if expected_path in driver.current_url:
-                return True
+                try:
+                    if role == "employee":
+                        return bool(driver.find_elements(By.ID, "leaveForm"))
 
-            alert = driver.find_element(By.ID, "authAlert")
-            alert_text = alert.text.strip()
+                    nav_buttons = driver.find_elements(
+                        By.CSS_SELECTOR,
+                        "#nav button",
+                    )
+                    content_items = driver.find_elements(
+                        By.CSS_SELECTOR,
+                        "#content > *",
+                    )
+                    return bool(nav_buttons and content_items)
+                except StaleElementReferenceException:
+                    return False
+
+            # During SPA navigation, authAlert can be removed between lookup
+            # and text retrieval. Treat this as a transient state, not failure.
+            try:
+                alert = driver.find_element(By.ID, "authAlert")
+                alert_text = alert.text.strip()
+            except (NoSuchElementException, StaleElementReferenceException):
+                return False
 
             if not alert_text or alert_text == registration_message:
                 return False
@@ -349,13 +382,23 @@ class LeaveApprovalWorkflowTest(unittest.TestCase):
     def _submit_leave_request(self, reason_text):
         """Submit a leave request for the currently logged-in employee."""
 
-        start_date = self.driver.find_element(By.NAME, "start_date")
-        end_date = self.driver.find_element(By.NAME, "end_date")
-        reason = self.driver.find_element(By.NAME, "reason")
+        # The employee form is rendered asynchronously by frontend/app.js.
+        # Wait for each control instead of assuming URL navigation means the
+        # SPA has finished rendering the request form.
+        start_date = self.wait.until(
+            EC.presence_of_element_located((By.NAME, "start_date"))
+        )
+        end_date = self.wait.until(
+            EC.presence_of_element_located((By.NAME, "end_date"))
+        )
+        reason = self.wait.until(
+            EC.presence_of_element_located((By.NAME, "reason"))
+        )
 
-        document = self.driver.find_element(
-            By.NAME,
-            "supporting_document",
+        document = self.wait.until(
+            EC.presence_of_element_located(
+                (By.NAME, "supporting_document")
+            )
         )
 
         document_path = (
@@ -364,6 +407,7 @@ class LeaveApprovalWorkflowTest(unittest.TestCase):
             / "supporting_document.pdf"
         )
         document.send_keys(str(document_path))
+        start_date_value, end_date_value = _future_leave_dates()
 
         self.driver.execute_script(
             """
@@ -378,7 +422,7 @@ class LeaveApprovalWorkflowTest(unittest.TestCase):
             element.dispatchEvent(new Event('change', { bubbles: true }));
             """,
             start_date,
-            "2026-10-01",
+            start_date_value,
         )
 
         self.driver.execute_script(
@@ -394,7 +438,7 @@ class LeaveApprovalWorkflowTest(unittest.TestCase):
             element.dispatchEvent(new Event('change', { bubbles: true }));
             """,
             end_date,
-            "2026-10-03",
+            end_date_value,
         )
 
         reason.send_keys(reason_text)
@@ -571,24 +615,18 @@ class LeaveApprovalWorkflowTest(unittest.TestCase):
 
         self.register_and_login()
 
-        start_date = self.driver.find_element(
-            By.NAME,
-            "start_date",
+        # The SPA inserts the leave form after login; wait for its controls.
+        start_date = self.wait.until(
+            EC.presence_of_element_located((By.NAME, "start_date"))
         )
-
-        end_date = self.driver.find_element(
-            By.NAME,
-            "end_date",
+        end_date = self.wait.until(
+            EC.presence_of_element_located((By.NAME, "end_date"))
         )
-
-        reason = self.driver.find_element(
-            By.NAME,
-            "reason",
+        reason = self.wait.until(
+            EC.presence_of_element_located((By.NAME, "reason"))
         )
-
-        document = self.driver.find_element(
-            By.NAME,
-            "supporting_document",
+        document = self.wait.until(
+            EC.presence_of_element_located((By.NAME, "supporting_document"))
         )
 
         document_path = (
@@ -598,6 +636,7 @@ class LeaveApprovalWorkflowTest(unittest.TestCase):
         )
 
         document.send_keys(str(document_path))
+        start_date_value, end_date_value = _future_leave_dates()
 
         # Set start date through the DOM and fire normal browser events.
         self.driver.execute_script(
@@ -613,7 +652,7 @@ class LeaveApprovalWorkflowTest(unittest.TestCase):
             element.dispatchEvent(new Event('change', { bubbles: true }));
             """,
             start_date,
-            "2026-10-01",
+            start_date_value,
         )
 
         # Set end date through the DOM and fire normal browser events.
@@ -630,7 +669,7 @@ class LeaveApprovalWorkflowTest(unittest.TestCase):
             element.dispatchEvent(new Event('change', { bubbles: true }));
             """,
             end_date,
-            "2026-10-03",
+            end_date_value,
         )
 
         reason.send_keys("Selenium integration test")
