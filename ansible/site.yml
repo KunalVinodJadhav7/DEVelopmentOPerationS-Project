@@ -9,13 +9,16 @@
     # For a remote Linux host, override with:
     # -e app_dir=/opt/leave-approval-system
     app_dir: "{{ lookup('env', 'LEAVEFLOW_ANSIBLE_APP_DIR') | default(lookup('env', 'HOME') ~ '/leave-approval-system', true) }}"
-    compose_project_name: leaveflow
-    compose_file_name: docker-compose.yml
+    # Jenkins passes the stable project name for its custom workspace.
+    # Standalone Linux executions retain the documented 'leaveflow' default.
+    compose_project_name: "{{ lookup('env', 'LEAVEFLOW_COMPOSE_PROJECT') | default('leaveflow', true) }}"
+    compose_file_name: "{{ lookup('env', 'LEAVEFLOW_COMPOSE_FILE') | default('docker-compose.yml', true) }}"
 
     release_version: "{{ lookup('env', 'LEAVEFLOW_APP_VERSION') | default(lookup('env', 'BUILD_NUMBER') | default('local', true), true) }}"
 
     secret_dir: "{{ app_dir }}/secrets"
     secret_file: "{{ secret_dir }}/leaveflow_secret_key.txt"
+    source_secret_file: "{{ playbook_dir }}/../secrets/leaveflow_secret_key.txt"
 
     app_port: 8000
 
@@ -47,8 +50,8 @@
         - 8000
         - 5432
 
-    # Resolve Docker from the interactive WSL environment once.
-    # Ansible's module PATH can be more restrictive than the user's shell PATH.
+    # Resolve Docker from the Ansible runner's shell once.
+    # Ansible's module PATH can be more restrictive than the runner's shell PATH.
     docker_cli: "{{ lookup('ansible.builtin.pipe', 'command -v docker') | trim }}"
 
   pre_tasks:
@@ -57,7 +60,7 @@
         that:
           - ansible_facts.system == 'Linux'
         fail_msg: >-
-          Week 13 Ansible playbook expects a Linux target. Run it from Ubuntu/WSL
+          Week 14 Ansible playbook expects a Linux target. Run it from Ubuntu/WSL
           or use a Linux remote host; do not run Linux tasks directly on Windows.
         success_msg: >-
           Linux target confirmed: {{ ansible_facts.distribution }}
@@ -99,7 +102,7 @@
       check_mode: false
 
   tasks:
-    - name: Display Week 13 configuration specification
+    - name: Display Week 14 configuration specification
       ansible.builtin.debug:
         msg:
           prerequisites: "{{ configuration_spec.logical_prerequisites }}"
@@ -127,6 +130,19 @@
         state: directory
         mode: '0700'
 
+    - name: Check whether Jenkins supplied a runtime secret
+      ansible.builtin.stat:
+        path: "{{ source_secret_file }}"
+      register: source_secret_state
+      changed_when: false
+
+    - name: Copy Jenkins-supplied runtime secret when available
+      ansible.builtin.copy:
+        src: "{{ source_secret_file }}"
+        dest: "{{ secret_file }}"
+        mode: '0600'
+      when: source_secret_state.stat.exists
+
     - name: Check whether runtime secret already exists
       ansible.builtin.stat:
         path: "{{ secret_file }}"
@@ -140,6 +156,7 @@
         creates: "{{ secret_file }}"
       when:
         - not ansible_check_mode
+        - not source_secret_state.stat.exists
         - not secret_state.stat.exists
       changed_when: true
 
@@ -148,7 +165,7 @@
         path: "{{ secret_file }}"
         state: file
         mode: '0600'
-      when: secret_state.stat.exists or not ansible_check_mode
+      when: secret_state.stat.exists or source_secret_state.stat.exists or not ansible_check_mode
 
     - name: Copy Dockerfile
       ansible.builtin.copy:
@@ -158,7 +175,7 @@
 
     - name: Copy Docker Compose definition
       ansible.builtin.copy:
-        src: "{{ playbook_dir }}/../docker-compose.yml"
+        src: "{{ playbook_dir }}/../{{ compose_file_name }}"
         dest: "{{ app_dir }}/{{ compose_file_name }}"
         mode: '0644'
 
@@ -184,6 +201,7 @@
         - templates
         - sql
         - nginx
+        - docker
 
     - name: Write release marker
       ansible.builtin.copy:
@@ -240,6 +258,8 @@
           - compose
           - -p
           - "{{ compose_project_name }}"
+          - -f
+          - "{{ app_dir }}/{{ compose_file_name }}"
           - ps
       register: compose_ps
       changed_when: false
@@ -257,6 +277,46 @@
       delay: 3
       until: health_response.status == 200
 
+    - name: Inspect deployed Compose containers
+      when: not ansible_check_mode
+      community.docker.docker_container_info:
+        name: "{{ item }}"
+      loop:
+        - leaveflow-db
+        - leaveflow-app
+        - leaveflow-nginx
+      register: deployed_containers
+      changed_when: false
+
+    - name: Verify application and database containers are healthy
+      when:
+        - not ansible_check_mode
+        - item.item in ['leaveflow-app', 'leaveflow-db']
+      ansible.builtin.assert:
+        that:
+          - item.exists | default(false)
+          - (item.container | default({})).get('State', {}).get('Status', 'missing') == 'running'
+          - (item.container | default({})).get('State', {}).get('Health', {}).get('Status', 'missing') == 'healthy'
+        fail_msg: "{{ item.item }} is missing, stopped, or unhealthy."
+        success_msg: "{{ item.item }} is running and healthy."
+      loop: "{{ deployed_containers.results | default([]) }}"
+      loop_control:
+        label: "{{ item.item }}"
+
+    - name: Verify Nginx container is running
+      when:
+        - not ansible_check_mode
+        - item.item == 'leaveflow-nginx'
+      ansible.builtin.assert:
+        that:
+          - item.exists | default(false)
+          - (item.container | default({})).get('State', {}).get('Status', 'missing') == 'running'
+        fail_msg: "{{ item.item }} is missing or stopped."
+        success_msg: "{{ item.item }} is running."
+      loop: "{{ deployed_containers.results | default([]) }}"
+      loop_control:
+        label: "{{ item.item }}"
+
     - name: Confirm PostgreSQL-backed health response
       when: not ansible_check_mode
       ansible.builtin.assert:
@@ -268,6 +328,46 @@
           PostgreSQL-backed state.
           Response: {{ health_response.content | default('no response', true) }}
         success_msg: FastAPI health check confirms PostgreSQL connectivity.
+
+    - name: Inspect deployed release image ID
+      when: not ansible_check_mode
+      ansible.builtin.command:
+        argv:
+          - "{{ docker_cli }}"
+          - image
+          - inspect
+          - "--format={{ '{{.Id}}' }}"
+          - "leave-approval-system:{{ release_version }}"
+      register: release_image_id
+      changed_when: false
+      check_mode: false
+
+    - name: Inspect latest image ID when present
+      when: not ansible_check_mode
+      ansible.builtin.command:
+        argv:
+          - "{{ docker_cli }}"
+          - image
+          - inspect
+          - "--format={{ '{{.Id}}' }}"
+          - leave-approval-system:latest
+      register: latest_image_id
+      changed_when: false
+      failed_when: false
+      check_mode: false
+
+    - name: Point latest tag at the verified release image
+      when:
+        - not ansible_check_mode
+        - latest_image_id.rc != 0 or (latest_image_id.stdout | trim) != (release_image_id.stdout | trim)
+      ansible.builtin.command:
+        argv:
+          - "{{ docker_cli }}"
+          - image
+          - tag
+          - "leave-approval-system:{{ release_version }}"
+          - leave-approval-system:latest
+      changed_when: true
 
     - name: Report check-mode limitation
       when: ansible_check_mode

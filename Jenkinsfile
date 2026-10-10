@@ -40,14 +40,14 @@ pipeline {
         booleanParam(
             name: 'RUN_ANSIBLE',
             defaultValue: false,
-            description: 'Week 13: run Ansible syntax/check-mode validation and LIVE configuration management/deployment inside the Docker-based Ansible environment. Disabled by default so Week 12 Docker CI/CD behavior is unchanged.'
+            description: 'Week 14: run Ansible syntax/check-mode validation, actual Docker Compose deployment, runtime health checks, and an idempotency re-run inside the Docker-based Ansible environment. Disabled by default to preserve the standard Docker CI/CD path.'
         )
 
         string(
             name: 'ANSIBLE_APP_DIR',
             defaultValue: '',
             trim: true,
-            description: 'Optional Week 13 Ansible application directory override for standalone Linux execution. For Jenkins live execution, leave blank; the pipeline uses /workspace/ansible-live/leaveflow.'
+            description: 'Optional Week 14 Ansible application directory override for standalone Linux execution. For Jenkins Docker-agent execution, leave blank; the pipeline uses /workspace/ansible-live/leaveflow.'
         )
     }
 
@@ -61,6 +61,7 @@ pipeline {
         DOCKER_BASE_URL   = 'http://localhost:8000'
         DOCKER_EXE        = 'C:\\Users\\kphvj\\AppData\\Local\\Programs\\DockerDesktop\\resources\\bin\\docker.exe'
         DOCKER_CONFIG     = 'C:\\Users\\kphvj\\.docker'
+        COMPOSE_PROJECT_NAME = 'leave-approval-ci_cd'
 
         // Docker Desktop installs its credential helper beside docker.exe.
         // Jenkins may not inherit that directory in PATH. Each Docker
@@ -464,136 +465,6 @@ pipeline {
             }
         }
 
-        // ============================================================
-        // WEEK 13 - ANSIBLE VALIDATION
-        //
-        // Runs inside a Docker-based Ansible validation environment so the
-        // Windows Jenkins controller does not have to host native Ansible.
-        // This stage is validation only; the normal Week 12 Docker deployment
-        // path is untouched.
-        // ============================================================
-
-        // ============================================================
-        // WEEK 13 - ANSIBLE CONFIGURATION MANAGEMENT + LIVE EXECUTION
-        //
-        // Jenkins runs as Windows LocalSystem, so native WSL execution is
-        // intentionally avoided. Ansible runs in an official Docker CLI
-        // environment with access to the Docker Desktop Linux engine.
-        //
-        // This stage performs:
-        //   1. Ansible/collection installation
-        //   2. Syntax validation
-        //   3. Check-mode validation
-        //   4. LIVE Ansible provisioning/deployment
-        //   5. Live health verification
-        // ============================================================
-
-        stage('Week 13 - Ansible Configuration Management') {
-            when {
-                expression {
-                    params.RUN_ANSIBLE
-                }
-            }
-
-            steps {
-                script {
-                    withEnv([
-                        "RUN_ANSIBLE_APP_DIR=/workspace/ansible-live/leaveflow",
-                        "RUN_ANSIBLE_HEALTH_HOST=host.docker.internal"
-                    ]) {
-                        powershell '''
-                            $ErrorActionPreference = "Stop"
-
-                            $dockerExe = $env:DOCKER_EXE
-                            $dockerBinDir = $env:DOCKER_BIN_DIR
-                            $workspace = $env:WORKSPACE
-                            $ansibleImage = 'docker:29.8.0-cli'
-                            $ansibleAppDir = '/workspace/ansible-live/leaveflow'
-                            $healthHost = 'host.docker.internal'
-
-                            Write-Host "=========================================="
-                            Write-Host "Week 13 Ansible Configuration Management"
-                            Write-Host "=========================================="
-                            Write-Host "Docker image: $ansibleImage"
-                            Write-Host "Jenkins workspace: $workspace"
-                            Write-Host "Ansible-managed directory: $ansibleAppDir"
-                            Write-Host "Health host: $healthHost"
-
-                            if (-not (Test-Path $dockerExe)) {
-                                throw "Docker CLI not found: $dockerExe"
-                            }
-
-                            if (-not ($env:PATH -split ';' | Where-Object { $_ -eq $dockerBinDir })) {
-                                $env:PATH = "$dockerBinDir;$env:PATH"
-                            }
-
-                            & $dockerExe --version
-                            if ($LASTEXITCODE -ne 0) {
-                                throw 'Docker CLI verification failed.'
-                            }
-
-                            # The Ansible runner reaches Docker Desktop's Linux
-                            # engine through the standard Unix Docker socket.
-                            # The Jenkins workspace is mounted so managed
-                            # configuration state remains visible to Jenkins.
-                            $command = @'
-set -eu
-echo "=== Install Ansible prerequisites ==="
-apk add --no-cache python3 py3-pip openssl curl
-echo "=== Create Ansible virtual environment ==="
-python3 -m venv /opt/ansible-venv
-echo "=== Install Ansible and Docker SDK ==="
-/opt/ansible-venv/bin/pip install --no-cache-dir ansible-core==2.21.4 docker==7.2.0
-echo "=== Verify Docker engine socket ==="
-docker info --format '{{.ServerVersion}}'
-docker compose version
-echo "=== Install Ansible collection ==="
-/opt/ansible-venv/bin/ansible-galaxy collection install -r /workspace/ansible/requirements.yml
-echo "=== Ansible version ==="
-/opt/ansible-venv/bin/ansible-playbook --version
-echo "=== Collection verification ==="
-/opt/ansible-venv/bin/ansible-galaxy collection list | grep -A2 'community.docker' || true
-echo "=== Syntax check ==="
-/opt/ansible-venv/bin/ansible-playbook -i /workspace/ansible/inventory.ini /workspace/ansible/site.yml -e "app_dir=${RUN_ANSIBLE_APP_DIR}" -e "health_host=${RUN_ANSIBLE_HEALTH_HOST}" -e "release_version=1.0.${LEAVEFLOW_BUILD_NUMBER}" --syntax-check
-echo "=== Check mode ==="
-/opt/ansible-venv/bin/ansible-playbook -i /workspace/ansible/inventory.ini /workspace/ansible/site.yml -e "app_dir=${RUN_ANSIBLE_APP_DIR}" -e "health_host=${RUN_ANSIBLE_HEALTH_HOST}" -e "release_version=1.0.${LEAVEFLOW_BUILD_NUMBER}" --check
-echo "=== LIVE Ansible execution ==="
-/opt/ansible-venv/bin/ansible-playbook -i /workspace/ansible/inventory.ini /workspace/ansible/site.yml -e "app_dir=${RUN_ANSIBLE_APP_DIR}" -e "health_host=${RUN_ANSIBLE_HEALTH_HOST}" -e "release_version=1.0.${LEAVEFLOW_BUILD_NUMBER}"
-echo "=== Post-deployment health verification ==="
-curl -fsS --max-time 20 "http://${RUN_ANSIBLE_HEALTH_HOST}:8000/health"
-echo
-echo "=== Ansible-managed release marker ==="
-cat "${RUN_ANSIBLE_APP_DIR}/RELEASE"
-'@
-
-                            $dockerArgs = @(
-                                'run',
-                                '--rm',
-                                '--pull', 'missing',
-                                '--env', "RUN_ANSIBLE_APP_DIR=$ansibleAppDir",
-                                '--env', "RUN_ANSIBLE_HEALTH_HOST=$healthHost",
-                                '--env', "LEAVEFLOW_BUILD_NUMBER=$env:BUILD_NUMBER",
-                                '--env', 'DOCKER_HOST=unix:///var/run/docker.sock',
-                                '--mount', "type=bind,source=$workspace,target=/workspace",
-                                '--mount', 'type=bind,source=/var/run/docker.sock.raw,target=/var/run/docker.sock',
-                                '--entrypoint', 'sh',
-                                $ansibleImage,
-                                '-c', $command
-                            )
-
-                            Write-Host "Starting live Ansible configuration-management runner..."
-                            & $dockerExe @dockerArgs
-                            if ($LASTEXITCODE -ne 0) {
-                                throw 'Live Ansible configuration-management execution failed.'
-                            }
-
-                            Write-Host "Week 13 Ansible configuration management and live deployment succeeded."
-                        '''
-                    }
-                }
-            }
-        }
-
         stage('Prepare Docker Release Metadata') {
             when {
                 expression {
@@ -653,13 +524,25 @@ Docker Registry Publishing: ${params.PUBLISH_DOCKER_IMAGE}
             }
 
             steps {
-                echo 'Stashing Docker deployment source for the Docker Desktop agent...'
+                echo 'Preparing and stashing Docker deployment source for the Docker Desktop agent...'
+
+                powershell '''
+                    $ErrorActionPreference = "Stop"
+                    $composeFile = Join-Path $env:WORKSPACE 'docker-compose.yml'
+                    $composeCiFile = Join-Path $env:WORKSPACE 'docker-compose.week12.yml'
+                    if (-not (Test-Path $composeFile)) {
+                        throw "docker-compose.yml not found: $composeFile"
+                    }
+                    Copy-Item -LiteralPath $composeFile -Destination $composeCiFile -Force
+                    Write-Host "Prepared Compose verification file: $composeCiFile"
+                '''
 
                 stash(
                     name: 'docker-deployment-source',
                     includes: """
                         Dockerfile,
                         docker-compose.yml,
+                        docker-compose.week12.yml,
                         .dockerignore,
                         .env.example,
                         README.md,
@@ -1716,6 +1599,167 @@ exit /b %EXITCODE%
         // DOCKER COMPOSE DEPLOYMENT
         // ============================================================
 
+        // ============================================================
+        // WEEK 14 - ANSIBLE DEPLOYMENT AND VERIFICATION
+        //
+        // This runs on the Docker Desktop agent after Docker connectivity is
+        // verified and before the standard Compose deployment stage. When
+        // RUN_ANSIBLE=true, Ansible owns the deployment for this run; the
+        // later standalone cleanup/deploy stages are skipped to avoid a
+        // second deployment racing the Ansible-managed containers.
+        // ============================================================
+
+        stage('Week 14 - Ansible Deployment and Verification') {
+            agent {
+                node {
+                    label 'docker-desktop-agent'
+                    customWorkspace 'C:\\Jenkins\\docker-agent-workspace\\Leave-Approval-CI_CD'
+                }
+            }
+            when {
+                beforeAgent true
+                expression {
+                    params.DEPLOY_MODE == 'docker' && params.RUN_ANSIBLE
+                }
+            }
+
+            steps {
+                script {
+                    withEnv([
+                        "RUN_ANSIBLE_APP_DIR=/workspace/ansible-live/leaveflow",
+                        "RUN_ANSIBLE_HEALTH_HOST=host.docker.internal",
+                        "RUN_ANSIBLE_COMPOSE_PROJECT=leave-approval-ci_cd"
+                    ]) {
+                        powershell '''
+                            $ErrorActionPreference = "Stop"
+
+                            $dockerExe = $env:DOCKER_EXE
+                            $dockerBinDir = $env:DOCKER_BIN_DIR
+                            $workspace = $env:WORKSPACE
+                            $ansibleImage = 'docker:29.8.0-cli'
+                            $ansibleAppDir = '/workspace/ansible-live/leaveflow'
+                            $healthHost = 'host.docker.internal'
+                            $releaseVersion = "1.0.$($env:BUILD_NUMBER)"
+                            $releaseImage = "leave-approval-system:$releaseVersion"
+                            $composeFile = Join-Path $workspace 'docker-compose.yml'
+
+                            Write-Host "=========================================="
+                            Write-Host "Week 14 Ansible Deployment and Verification"
+                            Write-Host "=========================================="
+                            Write-Host "Docker image: $ansibleImage"
+                            Write-Host "Jenkins Docker-agent workspace: $workspace"
+                            Write-Host "Ansible-managed directory: $ansibleAppDir"
+                            Write-Host "Compose project: $env:RUN_ANSIBLE_COMPOSE_PROJECT"
+                            Write-Host "Release image: $releaseImage"
+                            Write-Host "Health host: $healthHost"
+
+                            if (-not (Test-Path $dockerExe)) {
+                                throw "Docker CLI not found: $dockerExe"
+                            }
+                            if (-not (Test-Path $composeFile)) {
+                                throw "docker-compose.yml not found: $composeFile"
+                            }
+                            if ([string]::IsNullOrWhiteSpace($env:SECRET_KEY)) {
+                                throw "Jenkins credential leaveflow-secret-key is empty."
+                            }
+                            $secretDir = Join-Path $workspace 'secrets'
+                            $secretFile = Join-Path $secretDir 'leaveflow_secret_key.txt'
+                            New-Item -ItemType Directory -Force -Path $secretDir | Out-Null
+                            $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+                            [System.IO.File]::WriteAllText($secretFile, $env:SECRET_KEY, $utf8NoBom)
+                            Write-Host "Prepared the Jenkins-managed Compose runtime secret file."
+
+                            if (-not ($env:PATH -split ';' | Where-Object { $_ -eq $dockerBinDir })) {
+                                $env:PATH = "$dockerBinDir;$env:PATH"
+                            }
+                            $env:COMPOSE_PROJECT_NAME = 'leave-approval-ci_cd'
+
+                            & $dockerExe --version
+                            if ($LASTEXITCODE -ne 0) {
+                                throw 'Docker CLI verification failed.'
+                            }
+                            & $dockerExe info --format '{{.ServerVersion}}'
+                            if ($LASTEXITCODE -ne 0) {
+                                throw 'Docker Engine verification failed.'
+                            }
+
+                            $command = @'
+set -eu
+ANSIBLE=/opt/ansible-venv/bin/ansible-playbook
+PLAYBOOK=/workspace/ansible/site.yml
+INVENTORY=/workspace/ansible/inventory.ini
+
+ echo "=== Install Ansible prerequisites ==="
+apk add --no-cache python3 py3-pip openssl curl
+ echo "=== Create Ansible virtual environment ==="
+python3 -m venv /opt/ansible-venv
+ echo "=== Install Ansible and Docker SDK ==="
+/opt/ansible-venv/bin/pip install --no-cache-dir ansible-core==2.21.4 docker==7.2.0
+ echo "=== Verify Docker engine and Compose ==="
+docker info --format '{{.ServerVersion}}'
+docker compose version
+ echo "=== Install Ansible collection ==="
+/opt/ansible-venv/bin/ansible-galaxy collection install -r /workspace/ansible/requirements.yml
+ echo "=== Ansible version ==="
+$ANSIBLE --version
+ echo "=== Syntax check ==="
+$ANSIBLE -i "$INVENTORY" "$PLAYBOOK" -e "app_dir=${RUN_ANSIBLE_APP_DIR}" -e "health_host=${RUN_ANSIBLE_HEALTH_HOST}" -e "compose_project_name=${RUN_ANSIBLE_COMPOSE_PROJECT}" -e "release_version=${LEAVEFLOW_APP_VERSION}" --syntax-check
+ echo "=== Check mode ==="
+$ANSIBLE -i "$INVENTORY" "$PLAYBOOK" -e "app_dir=${RUN_ANSIBLE_APP_DIR}" -e "health_host=${RUN_ANSIBLE_HEALTH_HOST}" -e "compose_project_name=${RUN_ANSIBLE_COMPOSE_PROJECT}" -e "release_version=${LEAVEFLOW_APP_VERSION}" --check
+ echo "=== Live Ansible deployment ==="
+$ANSIBLE -i "$INVENTORY" "$PLAYBOOK" -e "app_dir=${RUN_ANSIBLE_APP_DIR}" -e "health_host=${RUN_ANSIBLE_HEALTH_HOST}" -e "compose_project_name=${RUN_ANSIBLE_COMPOSE_PROJECT}" -e "release_version=${LEAVEFLOW_APP_VERSION}"
+ echo "=== Second-run idempotency verification ==="
+if $ANSIBLE -i "$INVENTORY" "$PLAYBOOK" -e "app_dir=${RUN_ANSIBLE_APP_DIR}" -e "health_host=${RUN_ANSIBLE_HEALTH_HOST}" -e "compose_project_name=${RUN_ANSIBLE_COMPOSE_PROJECT}" -e "release_version=${LEAVEFLOW_APP_VERSION}" > /tmp/week14-ansible-idempotency.log 2>&1; then
+    cat /tmp/week14-ansible-idempotency.log
+else
+    cat /tmp/week14-ansible-idempotency.log
+    exit 1
+fi
+if ! grep -Eq 'changed=0([^0-9]|$)' /tmp/week14-ansible-idempotency.log; then
+    echo "ERROR: second Ansible execution did not report changed=0."
+    exit 1
+fi
+ echo "=== Final Docker Compose status ==="
+docker compose -p "${RUN_ANSIBLE_COMPOSE_PROJECT}" -f "${RUN_ANSIBLE_APP_DIR}/docker-compose.yml" ps
+ echo "=== Final HTTP health response ==="
+HEALTH_JSON="$(curl -fsS --max-time 20 "http://${RUN_ANSIBLE_HEALTH_HOST}:8000/health")"
+printf '%s\n' "$HEALTH_JSON"
+printf '%s' "$HEALTH_JSON" | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d.get("status")=="ok" and d.get("database")=="postgresql", d'
+ echo "=== Ansible-managed release marker ==="
+cat "${RUN_ANSIBLE_APP_DIR}/RELEASE"
+'@
+
+                            $dockerArgs = @(
+                                'run',
+                                '--rm',
+                                '--pull', 'missing',
+                                '--env', "RUN_ANSIBLE_APP_DIR=$ansibleAppDir",
+                                '--env', "RUN_ANSIBLE_HEALTH_HOST=$healthHost",
+                                '--env', "RUN_ANSIBLE_COMPOSE_PROJECT=$env:RUN_ANSIBLE_COMPOSE_PROJECT",
+                                '--env', "LEAVEFLOW_BUILD_NUMBER=$env:BUILD_NUMBER",
+                                '--env', "LEAVEFLOW_APP_VERSION=$releaseVersion",
+                                '--env', "LEAVEFLOW_APP_IMAGE=$releaseImage",
+                                '--env', 'DOCKER_HOST=unix:///var/run/docker.sock',
+                                '--mount', "type=bind,source=$workspace,target=/workspace",
+                                '--mount', 'type=bind,source=/var/run/docker.sock.raw,target=/var/run/docker.sock',
+                                '--entrypoint', 'sh',
+                                $ansibleImage,
+                                '-c', $command
+                            )
+
+                            Write-Host "Starting Week 14 live Ansible deployment..."
+                            & $dockerExe @dockerArgs
+                            if ($LASTEXITCODE -ne 0) {
+                                throw 'Week 14 Ansible deployment, runtime verification, or idempotency gate failed.'
+                            }
+
+                            Write-Host "Week 14 Ansible deployment and verification succeeded."
+                        '''
+                    }
+                }
+            }
+        }
+
         stage('Clean Docker Deployment State') {
             agent {
                 node {
@@ -1726,7 +1770,7 @@ exit /b %EXITCODE%
             when {
                 beforeAgent true
                 expression {
-                    params.DEPLOY_MODE == 'docker'
+                    params.DEPLOY_MODE == 'docker' && !params.RUN_ANSIBLE
                 }
             }
 
@@ -1825,7 +1869,7 @@ exit /b %EXITCODE%
             when {
                 beforeAgent true
                 expression {
-                    params.DEPLOY_MODE == 'docker'
+                    params.DEPLOY_MODE == 'docker' && !params.RUN_ANSIBLE
                 }
             }
 
@@ -2014,6 +2058,9 @@ exit /b %EXITCODE%
                     $expectedVersion = "1.0.$($env:BUILD_NUMBER)"
                     $expectedImage = "leave-approval-system:$expectedVersion"
                     $latestImage = 'leave-approval-system:latest'
+                    $env:COMPOSE_PROJECT_NAME = 'leave-approval-ci_cd'
+                    $env:LEAVEFLOW_APP_IMAGE = $expectedImage
+                    $env:LEAVEFLOW_APP_VERSION = $expectedVersion
 
                     # Keep the credential helper available for all Docker commands in this step.
                     if (-not ($env:PATH -split ';' | Where-Object { $_ -eq $dockerBinDir })) {
