@@ -1658,7 +1658,7 @@ exit /b %EXITCODE%
                                 throw "Cannot map Jenkins workspace to a Docker Desktop host path: $workspaceFullPath"
                             }
                             $workspaceDrive = $workspacePathMatch.Groups['drive'].Value.ToLowerInvariant()
-                            $workspaceRelative = $workspacePathMatch.Groups['relative'].Value.Replace('\', '/')
+                            $workspaceRelative = $workspacePathMatch.Groups['relative'].Value.Replace([string][char]92, '/')
                             $dockerHostWorkspace = "/run/desktop/mnt/host/$workspaceDrive/$workspaceRelative"
                             $dockerHostAppDir = "$dockerHostWorkspace/ansible-live/leaveflow"
 
