@@ -1683,6 +1683,24 @@ exit /b %EXITCODE%
                                 throw "Could not prepare the Ansible deployment directory on the Jenkins workspace: $ansibleLiveAppDirectory"
                             }
 
+                            # Pre-create all merge destinations on Windows before mounting the
+                            # workspace into the Linux Ansible runner. This avoids intermittent
+                            # mkdir failures on Docker Desktop Windows bind mounts.
+                            $ansibleSourceDirectories = @('app', 'frontend', 'templates', 'sql', 'nginx', 'docker')
+                            foreach ($directoryName in $ansibleSourceDirectories) {
+                                $sourceDirectory = Join-Path $workspace $directoryName
+                                if (-not (Test-Path -LiteralPath $sourceDirectory -PathType Container)) {
+                                    throw "Required Ansible source directory is missing: $sourceDirectory"
+                                }
+
+                                $destinationDirectory = Join-Path $ansibleLiveAppDirectory $directoryName
+                                New-Item -ItemType Directory -Force -Path $destinationDirectory | Out-Null
+                                if (-not (Test-Path -LiteralPath $destinationDirectory -PathType Container)) {
+                                    throw "Could not prepare Ansible merge destination: $destinationDirectory"
+                                }
+                            }
+                            Write-Host "Prepared all six Ansible source-directory destinations on the Windows workspace."
+
                             # The runtime key is passed to Compose as an environment-backed
                             # secret. Do not create a secrets directory in the workspace.
                             Write-Host "Prepared the Ansible app directory; no secret directory is required."
@@ -1774,6 +1792,14 @@ for path in /workspace/ansible-live /workspace/ansible-live/leaveflow; do
     if [ ! -d "$path" ]; then
         echo "ERROR: Windows-prepared directory is not visible as a directory in the Ansible runner: $path" >&2
         ls -ld -- "$(dirname -- "$path")" "$path" 2>&1 || true
+        exit 1
+    fi
+done
+for directory in app frontend templates sql nginx docker; do
+    path="/workspace/ansible-live/leaveflow/$directory"
+    if [ ! -d "$path" ]; then
+        echo "ERROR: Windows-prepared merge destination is not visible in the Ansible runner: $path" >&2
+        ls -ld -- /workspace/ansible-live/leaveflow "$path" 2>&1 || true
         exit 1
     fi
 done

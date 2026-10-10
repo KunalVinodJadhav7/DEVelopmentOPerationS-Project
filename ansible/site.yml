@@ -168,10 +168,13 @@
           exit 1
         fi
 
-        # mkdir -p is intentionally run by the shell here. The Ansible copy
-        # module's recursive directory creation raises EEXIST on some Docker
-        # Desktop Windows workspace mounts even when the directory is present.
-        mkdir -p -- "$dest"
+        # Jenkins pre-creates these destinations on Windows before the workspace
+        # is bind-mounted into the Linux runner. Avoid a redundant Linux mkdir on
+        # Docker Desktop Windows mounts, where directory creation can fail even
+        # though the parent exists. Keep mkdir as a fallback for standalone Linux.
+        if [ ! -d "$dest" ]; then
+          mkdir -p -- "$dest"
+        fi
 
         # Ignore destination-only files (matching the previous copy task's
         # non-pruning behavior), but copy the tree when a source file or
