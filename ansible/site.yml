@@ -128,6 +128,55 @@
         state: directory
         mode: '0755'
 
+    # Docker Desktop's workspace bind mount can retain a stale regular file
+    # (or a stale symlink) at this reserved directory path after an interrupted
+    # Compose run. Inspect both the link itself and its resolved target first.
+    - name: Inspect existing Compose secret directory path
+      ansible.builtin.stat:
+        path: "{{ secret_dir }}"
+        follow: false
+      register: secret_dir_lstat
+      changed_when: false
+      check_mode: false
+
+    - name: Inspect the resolved Compose secret path
+      ansible.builtin.stat:
+        path: "{{ secret_dir }}"
+        follow: true
+      register: secret_dir_follow
+      changed_when: false
+      check_mode: false
+
+    - name: Report a conflicting Compose secret path in check mode
+      ansible.builtin.assert:
+        that:
+          - not (secret_dir_lstat.stat.exists | default(false)) or (secret_dir_follow.stat.isdir | default(false))
+        fail_msg: >-
+          The Compose secret path {{ secret_dir }} already exists but is not a
+          directory. In live mode the playbook preserves it as a conflict backup
+          and creates the required directory.
+      when: ansible_check_mode
+
+    - name: Preserve a conflicting non-directory at the Compose secret path
+      ansible.builtin.shell: |
+        set -eu
+        target={{ secret_dir | quote }}
+        if [ -L "$target" ] || { [ -e "$target" ] && [ ! -d "$target" ]; }; then
+          backup="${target}.conflict-backup-$(date +%s)-$$"
+          mv -- "$target" "$backup"
+          printf 'Preserved conflicting path at: %s\n' "$backup"
+        else
+          echo "Compose secret path changed during inspection: $target" >&2
+          exit 1
+        fi
+      args:
+        executable: /bin/sh
+      when:
+        - not ansible_check_mode
+        - secret_dir_lstat.stat.exists | default(false)
+        - not (secret_dir_follow.stat.isdir | default(false))
+      changed_when: true
+
     - name: Create Compose secret directory
       ansible.builtin.file:
         path: "{{ secret_dir }}"
