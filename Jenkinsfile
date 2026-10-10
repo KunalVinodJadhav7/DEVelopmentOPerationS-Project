@@ -1652,7 +1652,7 @@ exit /b %EXITCODE%
                             $workspaceFullPath = [System.IO.Path]::GetFullPath($workspace)
                             $workspacePathMatch = [regex]::Match(
                                 $workspaceFullPath,
-                                '^(?<drive>[A-Za-z]):\\(?<relative>.*)$'
+                                '^(?<drive>[A-Za-z]):\\\\(?<relative>.*)$'
                             )
                             if (-not $workspacePathMatch.Success) {
                                 throw "Cannot map Jenkins workspace to a Docker Desktop host path: $workspaceFullPath"
