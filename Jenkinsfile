@@ -1729,6 +1729,27 @@ printf '%s' "$HEALTH_JSON" | python3 -c 'import json,sys; d=json.load(sys.stdin)
 cat "${RUN_ANSIBLE_APP_DIR}/RELEASE"
 '@
 
+                            # Do not pass the multiline shell program as a native
+                            # PowerShell argument to `sh -c`. Windows PowerShell's
+                            # native-argument quoting can split/reshape this payload,
+                            # allowing the container to exit without running Ansible.
+                            # Store it as an LF-only script in the bind-mounted workspace
+                            # and ask /bin/sh to execute that file explicitly.
+                            $runnerScriptPath = Join-Path $workspace 'week14-ansible-runner.sh'
+                            $runnerScriptContents = $command -replace "`r`n", "`n"
+                            $runnerScriptContents = $runnerScriptContents -replace "`r", "`n"
+                            $runnerUtf8NoBom = New-Object System.Text.UTF8Encoding($false)
+                            [System.IO.File]::WriteAllText(
+                                $runnerScriptPath,
+                                $runnerScriptContents,
+                                $runnerUtf8NoBom
+                            )
+                            if (-not (Test-Path $runnerScriptPath)) {
+                                throw "Failed to create the Ansible runner script: $runnerScriptPath"
+                            }
+                            Write-Host "Prepared Linux runner script: $runnerScriptPath"
+                            Write-Host "Runner script size: $((Get-Item $runnerScriptPath).Length) bytes"
+
                             $dockerArgs = @(
                                 'run',
                                 '--rm',
@@ -1744,7 +1765,7 @@ cat "${RUN_ANSIBLE_APP_DIR}/RELEASE"
                                 '--mount', 'type=bind,source=/var/run/docker.sock.raw,target=/var/run/docker.sock',
                                 '--entrypoint', 'sh',
                                 $ansibleImage,
-                                '-c', $command
+                                '/workspace/week14-ansible-runner.sh'
                             )
 
                             Write-Host "Starting Week 14 live Ansible deployment..."
@@ -1753,6 +1774,20 @@ cat "${RUN_ANSIBLE_APP_DIR}/RELEASE"
                                 throw 'Week 14 Ansible deployment, runtime verification, or idempotency gate failed.'
                             }
 
+                            # A successful docker-run exit alone is insufficient: prove
+                            # the expected release is actually running in the shared
+                            # Docker Desktop engine before allowing Selenium to proceed.
+                            Write-Host "Checking the deployed application image from Docker Desktop..."
+                            $deployedImage = (& $dockerExe inspect leaveflow-app --format '{{.Config.Image}}').Trim()
+                            if ($LASTEXITCODE -ne 0 -or $deployedImage -ne $releaseImage) {
+                                throw "Ansible runner exited successfully but leaveflow-app is not running the expected release. Expected=$releaseImage Actual=$deployedImage"
+                            }
+                            $appState = (& $dockerExe inspect leaveflow-app --format '{{.State.Status}}').Trim()
+                            $appHealth = (& $dockerExe inspect leaveflow-app --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}').Trim()
+                            if ($LASTEXITCODE -ne 0 -or $appState -ne 'running' -or $appHealth -ne 'healthy') {
+                                throw "Ansible deployment post-check failed: state=$appState health=$appHealth"
+                            }
+                            Write-Host "Verified leaveflow-app: image=$deployedImage state=$appState health=$appHealth"
                             Write-Host "Week 14 Ansible deployment and verification succeeded."
                         '''
                     }
@@ -2042,7 +2077,7 @@ cat "${RUN_ANSIBLE_APP_DIR}/RELEASE"
             when {
                 beforeAgent true
                 expression {
-                    params.DEPLOY_MODE == 'docker'
+                    params.DEPLOY_MODE == 'docker' && !params.RUN_ANSIBLE
                 }
             }
 
