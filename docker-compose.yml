@@ -93,4 +93,6 @@ volumes:
 
 secrets:
   leaveflow_secret_key:
-    file: "${LEAVEFLOW_DOCKER_HOST_APP_DIR:-.}/secrets/leaveflow_secret_key.txt"
+    # Docker Compose reads the value from the Jenkins credential environment.
+    # No secret file is created in the source, workspace, or app directory.
+    environment: LEAVEFLOW_SECRET_KEY

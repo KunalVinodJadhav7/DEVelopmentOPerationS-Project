@@ -16,10 +16,6 @@
 
     release_version: "{{ lookup('env', 'LEAVEFLOW_APP_VERSION') | default(lookup('env', 'BUILD_NUMBER') | default('local', true), true) }}"
 
-    secret_dir: "{{ app_dir }}/secrets"
-    secret_file: "{{ secret_dir }}/leaveflow_secret_key.txt"
-    source_secret_file: "{{ playbook_dir }}/../secrets/leaveflow_secret_key.txt"
-
     app_port: 8000
 
     # Docker-based Jenkins Ansible runner reaches the application through
@@ -33,7 +29,6 @@
     configuration_spec:
       logical_prerequisites:
         - Python 3
-        - OpenSSL
         - Docker Engine
         - Docker CLI
         - Docker Compose v2
@@ -42,7 +37,6 @@
       managed_directories:
         - "{{ app_dir }}"
         - "{{ app_dir }}/uploads"
-        - "{{ secret_dir }}"
       managed_files:
         - "{{ app_dir }}/Dockerfile"
         - "{{ app_dir }}/docker-compose.yml"
@@ -99,12 +93,6 @@
       changed_when: false
       check_mode: false
 
-    - name: Verify OpenSSL
-      ansible.builtin.command: openssl version
-      register: openssl_version
-      changed_when: false
-      check_mode: false
-
   tasks:
     - name: Display Week 14 configuration specification
       ansible.builtin.debug:
@@ -128,188 +116,15 @@
         state: directory
         mode: '0755'
 
-    # The Docker Desktop workspace bind mount can expose a stale file or symlink
-    # at the secret-directory path. Inspect this path, but let a shell task perform
-    # the final type check and repair in the same Linux namespace as Compose.
-    - name: Inspect existing Compose secret directory path
-      ansible.builtin.stat:
-        path: "{{ secret_dir }}"
-        follow: false
-      register: secret_dir_lstat
-      changed_when: false
-      check_mode: false
-
-    - name: Inspect the resolved Compose secret path
-      ansible.builtin.stat:
-        path: "{{ secret_dir }}"
-        follow: true
-      register: secret_dir_follow
-      changed_when: false
-      check_mode: false
-
-    - name: Report a conflicting Compose secret path in check mode
+    - name: Verify Jenkins runtime secret for the environment-backed Compose secret
       ansible.builtin.assert:
         that:
-          - not (secret_dir_lstat.stat.exists | default(false)) or (secret_dir_follow.stat.isdir | default(false))
+          - lookup('ansible.builtin.env', 'LEAVEFLOW_SECRET_KEY') | length >= 32
         fail_msg: >-
-          The Compose secret path {{ secret_dir }} already exists but is not a
-          directory. Live mode will preserve the conflicting object as a backup
-          and create the required directory.
-      when: ansible_check_mode
-
-    - name: Ensure Compose secret path and parent directories are real directories
-      ansible.builtin.shell: |
-        set -eu
-        app={{ app_dir | quote }}
-        target={{ secret_dir | quote }}
-        app_parent="$(dirname -- "$app")"
-        changed=0
-
-        ensure_real_directory() {
-          path="$1"
-
-          # Preserve the conflicting object itself. A dangling symlink or a
-          # file in any parent component can make mkdir -p report ENOENT even
-          # when the final target is not present.
-          if [ -L "$path" ] || { [ -e "$path" ] && [ ! -d "$path" ]; }; then
-            backup="${path}.conflict-backup-$(date +%s)-$$"
-            if ! mv -- "$path" "$backup"; then
-              echo "ERROR: could not preserve conflicting path: $path" >&2
-              return 1
-            fi
-            printf 'CHANGED: preserved conflicting path at %s\n' "$backup"
-            changed=1
-          fi
-
-          if [ ! -d "$path" ]; then
-            if ! mkdir -p -- "$path"; then
-              echo "ERROR: could not create directory: $path" >&2
-              echo "Path diagnostics (parent and target):" >&2
-              ls -ld -- "$(dirname -- "$path")" "$path" 2>&1 || true
-              return 1
-            fi
-            printf 'CHANGED: created directory %s\n' "$path"
-            changed=1
-          fi
-
-          if [ ! -d "$path" ]; then
-            echo "ERROR: path is still not a directory: $path" >&2
-            return 1
-          fi
-        }
-
-        # Ensure every component managed by this deployment is usable before
-        # creating the Compose file-backed secret below it.
-        ensure_real_directory "$app_parent"
-        ensure_real_directory "$app"
-        ensure_real_directory "$target"
-
-        current_mode="$(stat -c '%a' "$target" 2>/dev/null || true)"
-        if [ "$current_mode" != '700' ]; then
-          if ! chmod 0700 "$target"; then
-            echo "ERROR: could not enforce mode 0700 on $target" >&2
-            exit 1
-          fi
-          printf 'CHANGED: enforced mode 0700 on %s\n' "$target"
-          changed=1
-        fi
-
-        if [ "$changed" -eq 0 ]; then
-          printf 'OK: application parent, app directory, and Compose secret directory are real directories; secret directory mode is 0700\n'
-        fi
-      args:
-        executable: /bin/sh
-      register: secret_dir_ensure
-      changed_when: "'CHANGED:' in secret_dir_ensure.stdout"
-      when: not ansible_check_mode
-
-    - name: Check whether Jenkins supplied a runtime secret
-      ansible.builtin.stat:
-        path: "{{ source_secret_file }}"
-      register: source_secret_state
-      changed_when: false
-
-    - name: Copy Jenkins-supplied runtime secret when available
-      ansible.builtin.copy:
-        src: "{{ source_secret_file }}"
-        dest: "{{ secret_file }}"
-        mode: '0444'
-      when: source_secret_state.stat.exists
-
-    - name: Check whether runtime secret already exists
-      ansible.builtin.stat:
-        path: "{{ secret_file }}"
-      register: secret_state
-      changed_when: false
-
-    - name: Create runtime secret once when absent
-      ansible.builtin.shell: >-
-        umask 077 && openssl rand -hex 32 > {{ secret_file | quote }}
-      args:
-        creates: "{{ secret_file }}"
-      when:
-        - not ansible_check_mode
-        - not source_secret_state.stat.exists
-        - not secret_state.stat.exists
-      changed_when: true
-
-    - name: Enforce runtime secret permissions
-      ansible.builtin.file:
-        path: "{{ secret_file }}"
-        state: file
-        mode: '0444'
-      # In check mode, copy/shell tasks are simulated and do not create the
-      # destination secret. Do not ask the file module to chmod a file that
-      # exists only in the planned changes. Compose file-backed secrets are
-      # bind mounts: Compose does not remap uid/gid/mode for this source type.
-      # The non-root appuser must therefore be able to read the source file.
-      # Keep the parent directory restricted and protect its Windows ACLs.
-      when: not ansible_check_mode
-
-    - name: Check runtime secret length without displaying its value
-      when: not ansible_check_mode
-      ansible.builtin.command:
-        argv:
-          - python3
-          - -c
-          - >-
-            import pathlib, sys; value = pathlib.Path(sys.argv[1]).read_bytes().rstrip(b'\r\n'); sys.exit(0 if len(value) >= 32 else 1)
-          - "{{ secret_file }}"
-      register: runtime_secret_length_check
-      changed_when: false
-      failed_when: false
-
-    - name: Require an application-compatible runtime secret
-      when: not ansible_check_mode
-      ansible.builtin.assert:
-        that:
-          - runtime_secret_length_check.rc == 0
-        fail_msg: >-
-          The runtime secret is shorter than the 32-byte minimum enforced by
-          app/security.py. Update Jenkins credential 'leaveflow-secret-key' to
-          a strong random value of at least 32 bytes. The value is not printed.
-        success_msg: Runtime secret meets the application's minimum length.
-
-    - name: Verify runtime secret at the Docker Desktop host path
-      ansible.builtin.stat:
-        path: "{{ docker_host_app_dir }}/secrets/leaveflow_secret_key.txt"
-      register: docker_host_secret_state
-      changed_when: false
-      when:
-        - not ansible_check_mode
-        - docker_host_app_dir | length > 0
-
-    - name: Require Docker Desktop host secret to be a regular file
-      ansible.builtin.assert:
-        that:
-          - docker_host_secret_state.stat.exists
-          - docker_host_secret_state.stat.isreg
-        fail_msg: >-
-          The runtime secret is not visible as a regular file at the Docker Desktop
-          host path. Check the shared workspace bind mount before Compose deployment.
-      when:
-        - not ansible_check_mode
-        - docker_host_app_dir | length > 0
+          Jenkins credential 'leaveflow-secret-key' is missing or shorter than
+          32 characters. Set a strong random value of at least 32 bytes in Jenkins
+          Credentials. The value is never printed.
+        success_msg: Jenkins runtime secret is present and meets the minimum length.
 
     - name: Copy Dockerfile
       ansible.builtin.copy:
@@ -395,13 +210,14 @@
             state: present
             pull: missing
             build: policy
-          # Pass release metadata and the Docker Desktop host path to Compose.
-          # Keep these environment values aligned with Jenkins' shared workspace
-          # mount so file-backed secrets are resolved in the daemon-visible path.
+          # The environment-backed Compose secret is read from the Ansible
+          # runner's process environment. Do not write its value to a file or log.
           environment:
             LEAVEFLOW_APP_IMAGE: "leave-approval-system:{{ release_version }}"
             LEAVEFLOW_APP_VERSION: "{{ release_version }}"
             LEAVEFLOW_DOCKER_HOST_APP_DIR: "{{ docker_host_app_dir }}"
+            LEAVEFLOW_SECRET_KEY: "{{ lookup('ansible.builtin.env', 'LEAVEFLOW_SECRET_KEY') }}"
+          no_log: true
       rescue:
         - name: Capture application logs after Compose deployment failure
           ansible.builtin.command:
@@ -581,6 +397,38 @@
           verification. Run the playbook without --check for the actual Docker
           deployment and runtime health checks.
 
+    - name: Find obsolete file-backed Compose secret copies from previous runs
+      ansible.builtin.find:
+        paths: "{{ app_dir }}/secrets"
+        patterns:
+          - "leaveflow_secret_key.txt"
+          - "leaveflow_secret_key.txt.conflict-backup-*"
+        file_type: any
+        recurse: false
+      register: obsolete_runtime_secret_files
+      failed_when: false
+      when: not ansible_check_mode
+
+    - name: Remove obsolete file-backed Compose secret copies
+      ansible.builtin.file:
+        path: "{{ item.path }}"
+        state: absent
+      loop: "{{ obsolete_runtime_secret_files.files | default([]) }}"
+      loop_control:
+        label: "obsolete runtime secret copy"
+      when: not ansible_check_mode
+      no_log: true
+
+    - name: Remove obsolete secret directory if it is empty
+      ansible.builtin.command:
+        argv:
+          - rmdir
+          - "{{ app_dir }}/secrets"
+      register: obsolete_secret_dir_cleanup
+      failed_when: false
+      changed_when: obsolete_secret_dir_cleanup.rc == 0
+      when: not ansible_check_mode
+
     - name: Display final Ansible deployment summary
       ansible.builtin.debug:
         msg:
@@ -588,7 +436,6 @@
           - "Application directory: {{ app_dir }}"
           - "Docker: {{ docker_version.stdout }}"
           - "Compose: {{ compose_version.stdout }}"
-          - "OpenSSL: {{ openssl_version.stdout }}"
           - "Compose project: {{ compose_project_name }}"
           - "Health endpoint: http://{{ health_host }}:{{ app_port }}/health"
           - "Application directory exists: {{ app_dir_state.stat.exists }}"

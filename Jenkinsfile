@@ -1683,26 +1683,9 @@ exit /b %EXITCODE%
                                 throw "Could not prepare the Ansible deployment directory on the Jenkins workspace: $ansibleLiveAppDirectory"
                             }
 
-                            # The Linux runner sees this workspace through a Docker Desktop
-                            # bind mount. The failing mkdir is specifically the final
-                            # secrets child, so create that child on the Windows source
-                            # filesystem before starting the runner. Preserve a conflicting
-                            # file or reparse-point link rather than deleting it.
-                            $ansibleSecretDirectory = Join-Path $ansibleLiveAppDirectory 'secrets'
-                            $ansibleSecretItem = Get-Item -LiteralPath $ansibleSecretDirectory -Force -ErrorAction SilentlyContinue
-                            if ($null -ne $ansibleSecretItem -and (
-                                -not $ansibleSecretItem.PSIsContainer -or
-                                (($ansibleSecretItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0)
-                            )) {
-                                $conflictBackup = "${ansibleSecretDirectory}.conflict-$((Get-Date).ToString('yyyyMMdd-HHmmss-fff')).bak"
-                                Move-Item -LiteralPath $ansibleSecretDirectory -Destination $conflictBackup
-                                Write-Warning "Moved a conflicting object from the Ansible secret-directory path to: $conflictBackup"
-                            }
-                            New-Item -ItemType Directory -Force -Path $ansibleSecretDirectory | Out-Null
-                            if (-not (Test-Path -LiteralPath $ansibleSecretDirectory -PathType Container)) {
-                                throw "Could not prepare the Ansible secrets directory on the Jenkins workspace: $ansibleSecretDirectory"
-                            }
-                            Write-Host "Prepared host workspace directories for Ansible: $ansibleLiveAppDirectory and $ansibleSecretDirectory"
+                            # The runtime key is passed to Compose as an environment-backed
+                            # secret. Do not create a secrets directory in the workspace.
+                            Write-Host "Prepared the Ansible app directory; no secret directory is required."
 
                             Write-Host "=========================================="
                             Write-Host "Week 14 Ansible Deployment and Verification"
@@ -1724,12 +1707,20 @@ exit /b %EXITCODE%
                             if ([string]::IsNullOrWhiteSpace($env:SECRET_KEY)) {
                                 throw "Jenkins credential leaveflow-secret-key is empty."
                             }
-                            $secretDir = Join-Path $workspace 'secrets'
-                            $secretFile = Join-Path $secretDir 'leaveflow_secret_key.txt'
-                            New-Item -ItemType Directory -Force -Path $secretDir | Out-Null
-                            $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
-                            [System.IO.File]::WriteAllText($secretFile, $env:SECRET_KEY, $utf8NoBom)
-                            Write-Host "Prepared the Jenkins-managed Compose runtime secret file."
+                            # Use Docker Compose's environment-backed secret source.
+                            # The credential stays in process memory and is not written to disk.
+                            $env:LEAVEFLOW_SECRET_KEY = $env:SECRET_KEY
+                            $legacySecretDir = Join-Path $workspace 'secrets'
+                            $legacySecretFile = Join-Path $legacySecretDir 'leaveflow_secret_key.txt'
+                            if (Test-Path -LiteralPath $legacySecretFile -PathType Leaf) {
+                                Remove-Item -LiteralPath $legacySecretFile -Force
+                                Write-Host "Removed an obsolete workspace copy of the runtime secret."
+                            }
+                            if ((Test-Path -LiteralPath $legacySecretDir -PathType Container) -and
+                                -not (Get-ChildItem -LiteralPath $legacySecretDir -Force | Select-Object -First 1)) {
+                                Remove-Item -LiteralPath $legacySecretDir -Force
+                            }
+                            Write-Host "Prepared the environment-backed Docker Compose secret source."
 
                             if (-not ($env:PATH -split ';' | Where-Object { $_ -eq $dockerBinDir })) {
                                 $env:PATH = "$dockerBinDir;$env:PATH"
@@ -1751,22 +1742,22 @@ ANSIBLE=/opt/ansible-venv/bin/ansible-playbook
 PLAYBOOK=/workspace/ansible/site.yml
 INVENTORY=/workspace/ansible/inventory.ini
 
- echo "=== Verify Windows-prepared Ansible directories through the Linux bind mount ==="
-for path in /workspace/ansible-live /workspace/ansible-live/leaveflow /workspace/ansible-live/leaveflow/secrets; do
+ echo "=== Verify Windows-prepared Ansible app directory through the Linux bind mount ==="
+for path in /workspace/ansible-live /workspace/ansible-live/leaveflow; do
     if [ ! -d "$path" ]; then
         echo "ERROR: Windows-prepared directory is not visible as a directory in the Ansible runner: $path" >&2
         ls -ld -- "$(dirname -- "$path")" "$path" 2>&1 || true
         exit 1
     fi
 done
-probe="/workspace/ansible-live/leaveflow/secrets/.jenkins-bind-mount-probe-$$"
+probe="/workspace/ansible-live/leaveflow/.jenkins-bind-mount-probe-$$"
 if ! (umask 077; : > "$probe"); then
-    echo "ERROR: Linux runner cannot create a test file in the Windows-prepared secrets directory." >&2
-    ls -ld -- /workspace/ansible-live /workspace/ansible-live/leaveflow /workspace/ansible-live/leaveflow/secrets 2>&1 || true
+    echo "ERROR: Linux runner cannot create a test file in the Windows-prepared application directory." >&2
+    ls -ld -- /workspace/ansible-live /workspace/ansible-live/leaveflow 2>&1 || true
     exit 1
 fi
 rm -f -- "$probe"
-echo "Windows-created directory hierarchy is visible and writable in the Linux bind mount."
+echo "Windows-created application directory is visible and writable in the Linux bind mount; no secret folder is required."
 
  echo "=== Install Ansible prerequisites ==="
 apk add --no-cache python3 py3-pip openssl curl
@@ -1840,6 +1831,7 @@ cat "${RUN_ANSIBLE_APP_DIR}/RELEASE"
                                 '--env', "LEAVEFLOW_APP_VERSION=$releaseVersion",
                                 '--env', "LEAVEFLOW_APP_IMAGE=$releaseImage",
                                 '--env', "LEAVEFLOW_DOCKER_HOST_APP_DIR=$dockerHostAppDir",
+                                '--env', 'LEAVEFLOW_SECRET_KEY',
                                 '--env', 'DOCKER_HOST=unix:///var/run/docker.sock',
                                 '--mount', "type=bind,source=$workspace,target=/workspace",
                                 '--mount', 'type=bind,source=/var/run/docker.sock.raw,target=/var/run/docker.sock',
@@ -1898,7 +1890,6 @@ cat "${RUN_ANSIBLE_APP_DIR}/RELEASE"
                     $dockerExe = $env:DOCKER_EXE
                     $dockerBinDir = $env:DOCKER_BIN_DIR
                     $composeFile = Join-Path $env:WORKSPACE 'docker-compose.yml'
-                    $secretFile = Join-Path (Join-Path $env:WORKSPACE 'secrets') 'leaveflow_secret_key.txt'
                     $releaseVersion = "1.0.$($env:BUILD_NUMBER)"
                     $releaseImage = "leave-approval-system:$releaseVersion"
                     $latestImage = 'leave-approval-system:latest'
@@ -1919,17 +1910,18 @@ cat "${RUN_ANSIBLE_APP_DIR}/RELEASE"
                         throw "Jenkins credential leaveflow-secret-key is empty."
                     }
 
-                    # Compose validates file-backed secrets while reading the
-                    # project, so create the runtime secret before running
-                    # the cleanup command on a completely fresh workspace.
-                    $secretDir = Split-Path -Parent $secretFile
-                    New-Item -ItemType Directory -Force -Path $secretDir | Out-Null
-                    $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
-                    [System.IO.File]::WriteAllText(
-                        $secretFile,
-                        $env:SECRET_KEY,
-                        $utf8NoBom
-                    )
+                    # Compose consumes the Jenkins credential as an environment-backed
+                    # secret. Remove an obsolete file from earlier file-backed deployments.
+                    $env:LEAVEFLOW_SECRET_KEY = $env:SECRET_KEY
+                    $legacySecretDir = Join-Path $env:WORKSPACE 'secrets'
+                    $legacySecretFile = Join-Path $legacySecretDir 'leaveflow_secret_key.txt'
+                    if (Test-Path -LiteralPath $legacySecretFile -PathType Leaf) {
+                        Remove-Item -LiteralPath $legacySecretFile -Force
+                    }
+                    if ((Test-Path -LiteralPath $legacySecretDir -PathType Container) -and
+                        -not (Get-ChildItem -LiteralPath $legacySecretDir -Force | Select-Object -First 1)) {
+                        Remove-Item -LiteralPath $legacySecretDir -Force
+                    }
 
                     # Stop and remove the entire previous Compose stack.
                     # --volumes guarantees a new PostgreSQL data directory
@@ -1968,7 +1960,7 @@ cat "${RUN_ANSIBLE_APP_DIR}/RELEASE"
                         }
                     }
 
-                    Write-Host "Runtime secret file prepared for the fresh Compose deployment."
+                    Write-Host "Environment-backed Compose secret source is ready."
                     Write-Host "Previous Docker deployment state removed. Fresh run is ready."
                 '''
             }
@@ -2005,8 +1997,6 @@ cat "${RUN_ANSIBLE_APP_DIR}/RELEASE"
                     $dockerBinDir = $env:DOCKER_BIN_DIR
                     $composeFile = Join-Path $env:WORKSPACE 'docker-compose.yml'
                     $composeCiFile = Join-Path $env:WORKSPACE 'docker-compose.week12.yml'
-                    $secretDir = Join-Path $env:WORKSPACE 'secrets'
-                    $secretFile = Join-Path $secretDir 'leaveflow_secret_key.txt'
 
                     # Derive Week 12 release metadata directly from Jenkins BUILD_NUMBER.
                     # Do not rely on a previous Groovy env assignment surviving stage boundaries.
@@ -2034,26 +2024,21 @@ cat "${RUN_ANSIBLE_APP_DIR}/RELEASE"
                         throw "Jenkins credential leaveflow-secret-key is empty."
                     }
 
-                    # docker-compose.yml uses a file-backed Compose secret.
-                    # Create it from the Jenkins credential without printing
-                    # the secret value to the console.
-                    New-Item -ItemType Directory -Force -Path $secretDir | Out-Null
-
-                    # Write the secret as UTF-8 without a BOM so the Linux
-                    # container receives exactly the credential value.
-                    $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
-                    [System.IO.File]::WriteAllText(
-                        $secretFile,
-                        $env:SECRET_KEY,
-                        $utf8NoBom
-                    )
-
-                    if (-not (Test-Path $secretFile)) {
-                        throw "Docker secret file was not created."
+                    # Supply Jenkins' credential directly to Compose's environment-backed
+                    # secret source; the Docker flow does not write the key to a file.
+                    $env:LEAVEFLOW_SECRET_KEY = $env:SECRET_KEY
+                    $legacySecretDir = Join-Path $env:WORKSPACE 'secrets'
+                    $legacySecretFile = Join-Path $legacySecretDir 'leaveflow_secret_key.txt'
+                    if (Test-Path -LiteralPath $legacySecretFile -PathType Leaf) {
+                        Remove-Item -LiteralPath $legacySecretFile -Force
+                    }
+                    if ((Test-Path -LiteralPath $legacySecretDir -PathType Container) -and
+                        -not (Get-ChildItem -LiteralPath $legacySecretDir -Force | Select-Object -First 1)) {
+                        Remove-Item -LiteralPath $legacySecretDir -Force
                     }
 
                     Write-Host "Compose file: $composeFile"
-                    Write-Host "Runtime secret file created for Compose."
+                    Write-Host "Docker Compose will consume the Jenkins credential as an environment-backed secret."
 
                     # Keep the Week 11 repository Compose file unchanged.
                     # Week 12 creates a temporary Compose copy so the app service
