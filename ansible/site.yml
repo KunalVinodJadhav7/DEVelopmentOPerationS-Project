@@ -161,39 +161,103 @@
             exit 1
           fi
 
-          # Do not replace a file or symlink with a directory silently.
-          # Those are deployment conflicts, not empty directories to repair.
+          # Treat destination root conflicts explicitly; never replace a file or
+          # symlink with a directory. Existing destination-only files are kept.
           if [ -L "$dest" ] || { [ -e "$dest" ] && [ ! -d "$dest" ]; }; then
             echo "ERROR: destination exists but is not a real directory: $dest" >&2
             ls -ld -- "$dest" >&2 || true
             exit 1
           fi
 
-          # Jenkins pre-creates these destinations on Windows before the workspace
-          # is bind-mounted into the Linux runner. Avoid a redundant Linux mkdir on
-          # Docker Desktop Windows mounts, where directory creation can fail even
-          # though the parent exists. Keep mkdir as a fallback for standalone Linux.
+          # Only create the root when missing. Windows bind mounts can report
+          # EEXIST/ENOENT for redundant mkdir operations during production runs.
           if [ ! -d "$dest" ]; then
             mkdir -p -- "$dest"
           fi
 
-          # Ignore destination-only files (matching the previous copy task's
-          # non-pruning behavior), but copy the tree when a source file or
-          # directory is missing or content differs. This keeps repeat runs
-          # idempotent instead of overwriting identical files every time.
-          diff_output="$(diff -qr -- "$src" "$dest" 2>&1 || true)"
-          source_differences="$(printf '%s\n' "$diff_output" | awk -v destination="$dest" '
-            index($0, "Only in " destination "/") == 1 { next }
-            index($0, "Only in " destination ":") == 1 { next }
-            NF { print }
-          ')"
-
-          if [ -n "$source_differences" ]; then
-            cp -Rp -- "$src/." "$dest/"
-            printf 'CHANGED: merged source directory %s into %s\n' "$src" "$dest"
-          else
-            printf 'OK: source directory already matches destination: %s\n' "$dest"
-          fi
+          # Merge at file level rather than invoking cp on the entire tree.
+          # The production destination may already contain files from an older
+          # deployment; bulk cp can fail with EEXIST on Docker Desktop mounts.
+          MERGE_SRC="$src" MERGE_DEST="$dest" python3 - <<'PYMERGE'
+          import filecmp
+          import os
+          import shutil
+          import sys
+          from pathlib import Path
+          
+          src = Path(os.environ["MERGE_SRC"])
+          dest = Path(os.environ["MERGE_DEST"])
+          
+          def fail(message):
+              print(f"ERROR: {message}", file=sys.stderr)
+              raise SystemExit(1)
+          
+          if not src.is_dir():
+              fail(f"source directory is missing: {src}")
+          if dest.is_symlink() or (dest.exists() and not dest.is_dir()):
+              fail(f"destination exists but is not a real directory: {dest}")
+          if not dest.is_dir():
+              dest.mkdir(parents=True, exist_ok=True)
+          
+          changed = False
+          for root, dirnames, filenames in os.walk(src, topdown=True, followlinks=False):
+              source_dir = Path(root)
+              relative_dir = source_dir.relative_to(src)
+              target_dir = dest / relative_dir
+          
+              if target_dir.is_symlink() or (target_dir.exists() and not target_dir.is_dir()):
+                  fail(f"destination path conflicts with source directory: {target_dir}")
+              if not target_dir.is_dir():
+                  target_dir.mkdir(parents=True, exist_ok=True)
+                  changed = True
+          
+              # Preserve source symlinks without traversing them. A mismatching
+              # existing target is a conflict; do not replace it silently.
+              for name in list(dirnames):
+                  source_path = source_dir / name
+                  if source_path.is_symlink():
+                      dirnames.remove(name)
+                      target_path = target_dir / name
+                      link_value = os.readlink(source_path)
+                      if target_path.is_symlink() and os.readlink(target_path) == link_value:
+                          continue
+                      if target_path.exists() or target_path.is_symlink():
+                          fail(f"symlink destination conflict: {target_path}")
+                      os.symlink(link_value, target_path)
+                      changed = True
+          
+              for name in filenames:
+                  source_path = source_dir / name
+                  target_path = target_dir / name
+          
+                  if source_path.is_symlink():
+                      link_value = os.readlink(source_path)
+                      if target_path.is_symlink() and os.readlink(target_path) == link_value:
+                          continue
+                      if target_path.exists() or target_path.is_symlink():
+                          fail(f"symlink destination conflict: {target_path}")
+                      os.symlink(link_value, target_path)
+                      changed = True
+                      continue
+          
+                  if not source_path.is_file():
+                      continue
+                  if target_path.is_symlink() or (target_path.exists() and not target_path.is_file()):
+                      fail(f"file destination conflict: {target_path}")
+          
+                  if target_path.is_file() and filecmp.cmp(source_path, target_path, shallow=False):
+                      continue
+          
+                  # shutil.copy2 opens an existing regular file for writing,
+                  # unlike the bulk cp behavior that failed with EEXIST here.
+                  shutil.copy2(source_path, target_path)
+                  changed = True
+          
+          if changed:
+              print(f"CHANGED: merged source directory {src} into {dest}")
+          else:
+              print(f"OK: source directory already matches destination: {dest}")
+          PYMERGE
         executable: /bin/sh
       loop:
         - app
