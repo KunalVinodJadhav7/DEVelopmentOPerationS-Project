@@ -558,7 +558,8 @@ Docker Registry Publishing: ${params.PUBLISH_DOCKER_IMAGE}
                         sql/**/*,
                         docker/**/*,
                         nginx/**/*,
-                        scripts/**/*
+                        scripts/**/*,
+                        ansible/**/*
                     """,
                     useDefaultExcludes: false
                 )
@@ -1643,12 +1644,31 @@ exit /b %EXITCODE%
                             $releaseImage = "leave-approval-system:$releaseVersion"
                             $composeFile = Join-Path $workspace 'docker-compose.yml'
 
+                            # The Ansible runner is a container, but the Docker
+                            # daemon runs in Docker Desktop's Linux VM. File bind
+                            # sources must therefore use the daemon-visible path
+                            # for this Windows workspace, not /workspace/... from
+                            # inside the runner container.
+                            $workspaceFullPath = [System.IO.Path]::GetFullPath($workspace)
+                            $workspacePathMatch = [regex]::Match(
+                                $workspaceFullPath,
+                                '^(?<drive>[A-Za-z]):\\(?<relative>.*)$'
+                            )
+                            if (-not $workspacePathMatch.Success) {
+                                throw "Cannot map Jenkins workspace to a Docker Desktop host path: $workspaceFullPath"
+                            }
+                            $workspaceDrive = $workspacePathMatch.Groups['drive'].Value.ToLowerInvariant()
+                            $workspaceRelative = $workspacePathMatch.Groups['relative'].Value.Replace('\', '/')
+                            $dockerHostWorkspace = "/run/desktop/mnt/host/$workspaceDrive/$workspaceRelative"
+                            $dockerHostAppDir = "$dockerHostWorkspace/ansible-live/leaveflow"
+
                             Write-Host "=========================================="
                             Write-Host "Week 14 Ansible Deployment and Verification"
                             Write-Host "=========================================="
                             Write-Host "Docker image: $ansibleImage"
                             Write-Host "Jenkins Docker-agent workspace: $workspace"
-                            Write-Host "Ansible-managed directory: $ansibleAppDir"
+                            Write-Host "Ansible-managed directory (runner): $ansibleAppDir"
+                            Write-Host "Ansible-managed directory (Docker Engine host): $dockerHostAppDir"
                             Write-Host "Compose project: $env:RUN_ANSIBLE_COMPOSE_PROJECT"
                             Write-Host "Release image: $releaseImage"
                             Write-Host "Health host: $healthHost"
@@ -1760,6 +1780,7 @@ cat "${RUN_ANSIBLE_APP_DIR}/RELEASE"
                                 '--env', "LEAVEFLOW_BUILD_NUMBER=$env:BUILD_NUMBER",
                                 '--env', "LEAVEFLOW_APP_VERSION=$releaseVersion",
                                 '--env', "LEAVEFLOW_APP_IMAGE=$releaseImage",
+                                '--env', "LEAVEFLOW_DOCKER_HOST_APP_DIR=$dockerHostAppDir",
                                 '--env', 'DOCKER_HOST=unix:///var/run/docker.sock',
                                 '--mount', "type=bind,source=$workspace,target=/workspace",
                                 '--mount', 'type=bind,source=/var/run/docker.sock.raw,target=/var/run/docker.sock',
