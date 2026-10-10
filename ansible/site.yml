@@ -249,6 +249,12 @@
         state: present
         pull: missing
         build: policy
+      # Pass release metadata directly to the Compose module subprocess. This
+      # prevents Compose from falling back to :latest when the Ansible runner's
+      # inherited environment differs from the Jenkins controller environment.
+      environment:
+        LEAVEFLOW_APP_IMAGE: "leave-approval-system:{{ release_version }}"
+        LEAVEFLOW_APP_VERSION: "{{ release_version }}"
 
     - name: Verify Compose application status
       when: not ansible_check_mode
@@ -313,6 +319,23 @@
           - (item.container | default({})).get('State', {}).get('Status', 'missing') == 'running'
         fail_msg: "{{ item.item }} is missing or stopped."
         success_msg: "{{ item.item }} is running."
+      loop: "{{ deployed_containers.results | default([]) }}"
+      loop_control:
+        label: "{{ item.item }}"
+
+    - name: Verify the running application uses the requested release image
+      when:
+        - not ansible_check_mode
+        - item.item == 'leaveflow-app'
+      ansible.builtin.assert:
+        that:
+          - item.exists | default(false)
+          - (item.container | default({})).get('Config', {}).get('Image', '') == ('leave-approval-system:' ~ release_version)
+        fail_msg: >-
+          leaveflow-app is not running the requested release image.
+          Expected leave-approval-system:{{ release_version }}; actual
+          {{ (item.container | default({})).get('Config', {}).get('Image', 'missing') }}.
+        success_msg: "leaveflow-app is running leave-approval-system:{{ release_version }}."
       loop: "{{ deployed_containers.results | default([]) }}"
       loop_control:
         label: "{{ item.item }}"
