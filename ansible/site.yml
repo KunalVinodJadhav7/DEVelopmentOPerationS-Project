@@ -128,9 +128,9 @@
         state: directory
         mode: '0755'
 
-    # Docker Desktop's workspace bind mount can retain a stale regular file
-    # (or a stale symlink) at this reserved directory path after an interrupted
-    # Compose run. Inspect both the link itself and its resolved target first.
+    # The Docker Desktop workspace bind mount can expose a stale file or symlink
+    # at the secret-directory path. Inspect this path, but let a shell task perform
+    # the final type check and repair in the same Linux namespace as Compose.
     - name: Inspect existing Compose secret directory path
       ansible.builtin.stat:
         path: "{{ secret_dir }}"
@@ -153,35 +153,55 @@
           - not (secret_dir_lstat.stat.exists | default(false)) or (secret_dir_follow.stat.isdir | default(false))
         fail_msg: >-
           The Compose secret path {{ secret_dir }} already exists but is not a
-          directory. In live mode the playbook preserves it as a conflict backup
-          and creates the required directory.
+          directory. Live mode will preserve the conflicting object as a backup
+          and create the required directory.
       when: ansible_check_mode
 
-    - name: Preserve a conflicting non-directory at the Compose secret path
+    - name: Ensure Compose secret path is a real directory
       ansible.builtin.shell: |
         set -eu
         target={{ secret_dir | quote }}
-        if [ -L "$target" ] || { [ -e "$target" ] && [ ! -d "$target" ]; }; then
+        changed=0
+
+        # Always move a symlink itself aside, even if its target happens to be a
+        # directory. This avoids file-module EEXIST behavior on shared Windows mounts.
+        if [ -L "$target" ]; then
           backup="${target}.conflict-backup-$(date +%s)-$$"
           mv -- "$target" "$backup"
-          printf 'Preserved conflicting path at: %s\n' "$backup"
-        else
-          echo "Compose secret path changed during inspection: $target" >&2
+          printf 'CHANGED: preserved existing symlink at %s\n' "$backup"
+          changed=1
+        elif [ -e "$target" ] && [ ! -d "$target" ]; then
+          backup="${target}.conflict-backup-$(date +%s)-$$"
+          mv -- "$target" "$backup"
+          printf 'CHANGED: preserved conflicting file at %s\n' "$backup"
+          changed=1
+        fi
+
+        if [ ! -d "$target" ]; then
+          mkdir -p -- "$target"
+          printf 'CHANGED: created Compose secret directory %s\n' "$target"
+          changed=1
+        fi
+
+        current_mode="$(stat -c '%a' "$target" 2>/dev/null || true)"
+        if [ "$current_mode" != '700' ]; then
+          chmod 0700 "$target"
+          printf 'CHANGED: enforced mode 0700 on %s\n' "$target"
+          changed=1
+        fi
+
+        if [ ! -d "$target" ]; then
+          echo "ERROR: Compose secret path is still not a directory: $target" >&2
           exit 1
+        fi
+        if [ "$changed" -eq 0 ]; then
+          printf 'OK: Compose secret directory already exists with mode 0700\n'
         fi
       args:
         executable: /bin/sh
-      when:
-        - not ansible_check_mode
-        - secret_dir_lstat.stat.exists | default(false)
-        - not (secret_dir_follow.stat.isdir | default(false))
-      changed_when: true
-
-    - name: Create Compose secret directory
-      ansible.builtin.file:
-        path: "{{ secret_dir }}"
-        state: directory
-        mode: '0700'
+      register: secret_dir_ensure
+      changed_when: "'CHANGED:' in secret_dir_ensure.stdout"
+      when: not ansible_check_mode
 
     - name: Check whether Jenkins supplied a runtime secret
       ansible.builtin.stat:
