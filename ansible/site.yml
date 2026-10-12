@@ -183,6 +183,7 @@
           import os
           import shutil
           import sys
+          import time
           from pathlib import Path
           
           src = Path(os.environ["MERGE_SRC"])
@@ -248,10 +249,38 @@
                   if target_path.is_file() and filecmp.cmp(source_path, target_path, shallow=False):
                       continue
           
-                  # shutil.copy2 opens an existing regular file for writing,
-                  # unlike the bulk cp behavior that failed with EEXIST here.
-                  shutil.copy2(source_path, target_path)
-                  changed = True
+                  # Docker Desktop shared mounts can transiently lose directory
+                  # visibility between the directory check and the file write.
+                  copied = False
+                  for attempt in range(1, 6):
+                      try:
+                          parent = target_path.parent
+                          if parent.is_symlink() or (parent.exists() and not parent.is_dir()):
+                              fail(f"destination parent conflict: {parent}")
+
+                          # Recreate a missing parent directory immediately before copying.
+                          parent.mkdir(parents=True, exist_ok=True)
+
+                          # Keep the existing safety checks: never replace a symlink
+                          # or a non-regular destination with a regular file.
+                          if target_path.is_symlink() or (target_path.exists() and not target_path.is_file()):
+                              fail(f"file destination conflict: {target_path}")
+
+                          shutil.copy2(source_path, target_path)
+                          copied = True
+                          break
+                      except FileNotFoundError as exc:
+                          if attempt == 5:
+                              fail(
+                                  f"Copy failed after 5 attempts: "
+                                  f"{source_path} -> {target_path}: {exc}"
+                              )
+                          # Retry transient shared-mount visibility errors with
+                          # a short increasing delay; do not delete destination data.
+                          time.sleep(0.2 * attempt)
+
+                  if copied:
+                      changed = True
           
           if changed:
               print(f"CHANGED: merged source directory {src} into {dest}")
