@@ -463,7 +463,7 @@ class LeaveApprovalWorkflowTest(unittest.TestCase):
         )
 
     def _create_employee_request(self, reason_text):
-        """Register an employee and create a PENDING_HR leave request."""
+        """Register an employee and create a PENDING_MANAGER leave request."""
 
         employee_username = f"hrflow_emp_{uuid.uuid4().hex[:8]}"
         employee_email = f"{employee_username}@example.com"
@@ -479,12 +479,12 @@ class LeaveApprovalWorkflowTest(unittest.TestCase):
 
         self._submit_leave_request(reason_text)
 
-        # Confirm the request appears under My requests as PENDING HR.
-        self.wait_click("#nav button:nth-child(3)")
+        # Confirm the request appears under My requests as PENDING MANAGER.
+        self.wait_click("//nav[@id='nav']//button[normalize-space()='My requests']")
         self.wait.until(
             lambda driver: (
                 reason_text in driver.find_element(By.TAG_NAME, "body").text
-                and "PENDING HR" in driver.find_element(By.TAG_NAME, "body").text
+                and "PENDING MANAGER" in driver.find_element(By.TAG_NAME, "body").text
             )
         )
 
@@ -524,7 +524,7 @@ class LeaveApprovalWorkflowTest(unittest.TestCase):
         )
 
     def _hr_decide(self, reason_text, approved):
-        """Log in as HR, review a specific request, and record a decision."""
+        """Log in as HR after Manager, review the request, and record the final HR decision."""
 
         hr_username = f"hr_{uuid.uuid4().hex[:8]}"
         hr_email = f"{hr_username}@example.com"
@@ -552,6 +552,8 @@ class LeaveApprovalWorkflowTest(unittest.TestCase):
             )
         )
 
+        manager_rejected = "Manager decision: Rejected" in request_card.text
+        self.assertIn("PENDING HR FINAL", request_card.text.upper())
         review_button = request_card.find_element(
             By.XPATH,
             ".//button[normalize-space()='Review']",
@@ -569,10 +571,15 @@ class LeaveApprovalWorkflowTest(unittest.TestCase):
         )
 
         if approved:
-            decision_text = "Decision recorded"
+            decision_text = (
+                "Manager rejection confirmed"
+                if manager_rejected
+                else "Decision recorded"
+            )
+            button_text = "Confirm rejection" if manager_rejected else "Confirm for Admin"
             button_locator = (
                 By.XPATH,
-                "//button[normalize-space()='Approve']",
+                f"//button[normalize-space()='{button_text}']",
             )
         else:
             decision_text = "Request rejected"
@@ -596,9 +603,9 @@ class LeaveApprovalWorkflowTest(unittest.TestCase):
             lambda driver: decision_text in driver.find_element(By.TAG_NAME, "body").text
         )
 
-        self.wait_click("#nav button:nth-child(3)")
+        self.wait_click("//nav[@id='nav']//button[normalize-space()='Audit trail']")
 
-        expected_status = "PENDING MANAGER" if approved else "REJECTED"
+        expected_status = "PENDING ADMIN" if approved and not manager_rejected else "REJECTED"
         self.wait.until(
             lambda driver: (
                 reason_text in driver.find_element(By.TAG_NAME, "body").text
@@ -694,11 +701,11 @@ class LeaveApprovalWorkflowTest(unittest.TestCase):
             alert.text,
         )
 
-        self.wait_click("#nav button:nth-child(3)")
+        self.wait_click("//nav[@id='nav']//button[normalize-space()='My requests']")
 
         self.wait.until(
             lambda driver: (
-                "PENDING HR"
+                "PENDING MANAGER"
                 in driver.find_element(By.TAG_NAME, "body").text
             )
         )
@@ -708,35 +715,49 @@ class LeaveApprovalWorkflowTest(unittest.TestCase):
             "body",
         ).text
 
-        self.assertIn("PENDING HR", body_text)
+        self.assertIn("PENDING MANAGER", body_text)
         self.assertIn("Selenium integration test", body_text)
 
     def test_hr_approves_employee_leave_request(self):
-        """Verify HR can review and approve an employee leave request."""
+        """Verify Manager approves first and HR then approves the request."""
 
         reason_text = f"Selenium HR approval {uuid.uuid4().hex[:8]}"
 
         self._create_employee_request(reason_text)
         self._logout()
+        self._manager_decide(reason_text, approved=True)
+        self._logout()
         self._hr_decide(reason_text, approved=True)
 
     def test_hr_rejects_employee_leave_request(self):
-        """Verify HR can review and reject an employee leave request."""
+        """Verify Manager approves first and HR can veto the request."""
 
         reason_text = f"Selenium HR rejection {uuid.uuid4().hex[:8]}"
 
         self._create_employee_request(reason_text)
         self._logout()
+        self._manager_decide(reason_text, approved=True)
+        self._logout()
         self._hr_decide(reason_text, approved=False)
+
+    def test_manager_rejection_still_requires_hr_review(self):
+        """Manager can reject first; HR must then confirm the rejection."""
+        reason_text = f"Selenium Manager rejection HR confirmation {uuid.uuid4().hex[:8]}"
+        self._create_employee_request(reason_text)
+        self._logout()
+        self._manager_decide(reason_text, approved=False)
+        self._logout()
+        self._hr_veto_decide(reason_text, approved=True)
+
 
 
     # ============================================================
     # WEEK 10 EXTENSIONS
-    # Employee -> HR -> Manager -> Admin -> Super Admin -> Employee
+    # Employee -> Manager -> HR -> Admin -> Super Admin -> Employee
     # ============================================================
 
     def _manager_decide(self, reason_text, approved):
-        """Log in as Manager, review the request, and record a decision."""
+        """Log in as Manager and record an approve/reject decision before HR review."""
 
         manager_username = f"manager_{uuid.uuid4().hex[:8]}"
         manager_email = f"{manager_username}@example.com"
@@ -826,13 +847,9 @@ class LeaveApprovalWorkflowTest(unittest.TestCase):
 
         # Audit Trail is the third navigation button and shows request
         # status/history for this role.
-        self.wait_click("#nav button:nth-child(3)")
+        self.wait_click("//nav[@id='nav']//button[normalize-space()='Audit trail']")
 
-        expected_status = (
-            "PENDING ADMIN"
-            if approved
-            else "REJECTED"
-        )
+        expected_status = "PENDING HR FINAL"
 
         self.wait.until(
             lambda driver: (
@@ -863,6 +880,59 @@ class LeaveApprovalWorkflowTest(unittest.TestCase):
             expected_status,
             body_text,
         )
+
+    def _hr_veto_decide(self, reason_text, approved):
+        # HR reviews after every Manager decision; Manager rejection remains final.
+        hr_username = f"hrveto_{uuid.uuid4().hex[:8]}"
+        hr_email = f"{hr_username}@example.com"
+        hr_password = "Passw0rd!"
+        self._register_user_and_login(
+            hr_username,
+            hr_email,
+            hr_password,
+            "hr",
+            "/hr",
+        )
+        self.wait_click("#nav button:nth-child(2)")
+        request_card = self.wait.until(
+            EC.presence_of_element_located((
+                By.XPATH,
+                "//article[contains(@class,'request')]"
+                f"[contains(.//div[contains(@class,'request-meta')], '{reason_text}')]",
+            ))
+        )
+        self.assertIn("PENDING HR FINAL", request_card.text.upper())
+        manager_rejected = "Manager decision: Rejected" in request_card.text
+        request_card.find_element(
+            By.XPATH, ".//button[normalize-space()='Review']"
+        ).click()
+        comments = self.wait.until(
+            EC.visibility_of_element_located((By.ID, "reviewComments"))
+        )
+        comments.send_keys(
+            "Selenium HR final review passed."
+            if approved else "Selenium HR final review rejected the request."
+        )
+        button_text = ("Confirm rejection" if manager_rejected else "Confirm for Admin") if approved else "Reject"
+        self.wait.until(EC.element_to_be_clickable((
+            By.XPATH, f"//button[normalize-space()='{button_text}']"
+        ))).click()
+        self.wait.until(EC.invisibility_of_element_located((By.ID, "reviewComments")))
+        decision_text = (
+            "Manager rejection confirmed"
+            if approved and manager_rejected
+            else "Decision recorded" if approved
+            else "Request rejected"
+        )
+        self.wait.until(lambda driver: decision_text in driver.find_element(By.TAG_NAME, "body").text)
+        # Once HR confirms or vetoes, the item leaves the action queue. Check
+        # the Audit Trail page to verify its new status.
+        self.wait_click("//nav[@id='nav']//button[normalize-space()='Audit trail']")
+        expected_status = "PENDING ADMIN" if approved and not manager_rejected else "REJECTED"
+        self.wait.until(lambda driver: (
+            reason_text in driver.find_element(By.TAG_NAME, "body").text
+            and expected_status in driver.find_element(By.TAG_NAME, "body").text
+        ))
 
     def _admin_decide(self, reason_text, approved):
         """Log in as Admin, finalize the request, and record a decision."""
@@ -964,7 +1034,7 @@ class LeaveApprovalWorkflowTest(unittest.TestCase):
         )
 
         # Verify through Audit Trail.
-        self.wait_click("#nav button:nth-child(3)")
+        self.wait_click("//nav[@id='nav']//button[normalize-space()='Audit trail']")
 
         self.wait.until(
             lambda driver: (
@@ -1070,7 +1140,7 @@ class LeaveApprovalWorkflowTest(unittest.TestCase):
         )
 
         # Open Audit Trail and inspect the request audit.
-        self.wait_click("#nav button:nth-child(3)")
+        self.wait_click("//nav[@id='nav']//button[normalize-space()='Audit trail']")
 
         self.wait.until(
             lambda driver: (
@@ -1213,7 +1283,7 @@ class LeaveApprovalWorkflowTest(unittest.TestCase):
         )
 
         # Employee queue is the third navigation button.
-        self.wait_click("#nav button:nth-child(3)")
+        self.wait_click("//nav[@id='nav']//button[normalize-space()='My requests']")
 
         request_card = self.wait.until(
             EC.presence_of_element_located(
@@ -1271,11 +1341,12 @@ class LeaveApprovalWorkflowTest(unittest.TestCase):
         self,
         suffix,
         admin_approved,
+        hr_veto_approved=True,
     ):
         """
         Full Week 10 acceptance flow:
 
-        Employee -> Submit -> HR Approve -> Manager Approve
+        Employee -> Manager Decision -> HR Final Review
         -> Admin Finalize -> Super Admin Notify -> Employee Verify.
         """
 
@@ -1313,7 +1384,7 @@ class LeaveApprovalWorkflowTest(unittest.TestCase):
         )
 
         # Verify initial state.
-        self.wait_click("#nav button:nth-child(3)")
+        self.wait_click("//nav[@id='nav']//button[normalize-space()='My requests']")
 
         self.wait.until(
             lambda driver: (
@@ -1322,7 +1393,7 @@ class LeaveApprovalWorkflowTest(unittest.TestCase):
                     By.TAG_NAME,
                     "body",
                 ).text
-                and "PENDING HR"
+                and "PENDING MANAGER"
                 in driver.find_element(
                     By.TAG_NAME,
                     "body",
@@ -1331,16 +1402,7 @@ class LeaveApprovalWorkflowTest(unittest.TestCase):
         )
 
         # --------------------------------------------------------
-        # 2. HR reviews and approves.
-        # --------------------------------------------------------
-        self._logout()
-        self._hr_decide(
-            reason_text,
-            approved=True,
-        )
-
-        # --------------------------------------------------------
-        # 3. Manager reviews and approves.
+        # 2. Manager decides first, without waiting for HR.
         # --------------------------------------------------------
         self._logout()
         self._manager_decide(
@@ -1349,22 +1411,30 @@ class LeaveApprovalWorkflowTest(unittest.TestCase):
         )
 
         # --------------------------------------------------------
-        # 4. Admin finalizes.
+        # 3. HR always reviews after the Manager decision.
         # --------------------------------------------------------
         self._logout()
-        self._admin_decide(
+        self._hr_veto_decide(
             reason_text,
-            approved=admin_approved,
-        )
-
-        expected_status = (
-            "APPROVED"
-            if admin_approved
-            else "REJECTED"
+            approved=hr_veto_approved,
         )
 
         # --------------------------------------------------------
-        # 5. Super Admin notifies employee.
+        # 5. Admin finalizes only after HR clears the veto check.
+        # --------------------------------------------------------
+        if hr_veto_approved:
+            self._logout()
+            self._admin_decide(
+                reason_text,
+                approved=admin_approved,
+            )
+            expected_status = "APPROVED" if admin_approved else "REJECTED"
+        else:
+            # HR's veto is final for this request; Admin cannot override it.
+            expected_status = "REJECTED"
+
+        # --------------------------------------------------------
+        # 6. Super Admin notifies employee.
         # --------------------------------------------------------
         self._logout()
 
@@ -1400,11 +1470,19 @@ class LeaveApprovalWorkflowTest(unittest.TestCase):
         )
 
     def test_week10_complete_rejection_workflow(self):
-        """Complete Week 10 rejection path through employee notification."""
+        """Complete Admin rejection path through employee notification."""
 
         self._run_week10_complete_workflow(
             suffix="rejection",
             admin_approved=False,
+        )
+
+    def test_hr_can_veto_after_manager_approval(self):
+        """HR can reject after Manager approval and before Admin finalization."""
+        self._run_week10_complete_workflow(
+            suffix="hr_veto",
+            admin_approved=True,
+            hr_veto_approved=False,
         )
 
 
