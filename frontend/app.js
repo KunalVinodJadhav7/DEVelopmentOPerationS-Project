@@ -2,6 +2,9 @@ const state = {
     token: localStorage.getItem('leave_token') || '',
     user: null,
     requests: [],
+    leaveTypes: [],
+    balances: [],
+    policies: [],
     page: 'overview',
     selected: null
 };
@@ -48,6 +51,7 @@ const roleMeta = {
         nav: [
             ['overview', 'Overview', '⌂'],
             ['requests', 'Admin queue', '☰'],
+            ['policies', 'Leave policies', '⚙'],
             ['audit', 'Audit trail', '◌']
         ]
     },
@@ -59,6 +63,7 @@ const roleMeta = {
         nav: [
             ['overview', 'Overview', '⌂'],
             ['requests', 'Operations', '☰'],
+            ['policies', 'Leave policies', '⚙'],
             ['audit', 'Audit trail', '◌']
         ]
     }
@@ -138,9 +143,10 @@ function statusLabel(s) {
 
 function progressFor(status) {
     return {
-        PENDING_HR: 25,
-        PENDING_MANAGER: 50,
-        PENDING_ADMIN: 75,
+        PENDING_HR: 20, // legacy status only
+        PENDING_MANAGER: 20,
+        PENDING_HR_FINAL: 40,
+        PENDING_ADMIN: 60,
         APPROVED: 100,
         REJECTED: 100
     }[status] || 0;
@@ -149,16 +155,17 @@ function progressFor(status) {
 function timeline(status) {
     const steps = [
         ['Employee', 'Submitted'],
-        ['HR', 'Verified'],
-        ['Manager', 'Reviewed'],
+        ['Manager', 'Approve or reject'],
+        ['HR', 'Final review'],
         ['Admin', 'Finalized'],
         ['Super Admin', 'Notified']
     ];
 
     const order = {
-        PENDING_HR: 0,
+        PENDING_HR: 2, // legacy status during upgrade only
         PENDING_MANAGER: 1,
-        PENDING_ADMIN: 2,
+        PENDING_HR_FINAL: 2,
+        PENDING_ADMIN: 3,
         APPROVED: 4,
         REJECTED: 4
     };
@@ -209,8 +216,11 @@ function requestCard(r, actions = '') {
           ${escapeHtml(r.start_date || '')}
           →
           ${escapeHtml(r.end_date || '')}
+          · ${escapeHtml(r.leave_type_code || 'CL')}
+          · ${Number(r.requested_days || 0)} workday(s)
           ·
           ${escapeHtml(r.reason || '')}
+          ${r.manager_approved === true ? ' · Manager decision: Approved' : r.manager_approved === false ? ' · Manager decision: Rejected' : ''}
         </div>
       </div>
 
@@ -332,6 +342,11 @@ function headers(page) {
         audit: [
             'Audit trail',
             'Trace every decision and notification'
+        ],
+
+        policies: [
+            'Leave policies',
+            'Configure leave types and annual weekday allowances'
         ]
     };
 
@@ -436,16 +451,14 @@ function nextPanel() {
     const r = state.user.role;
 
     const target = {
-        employee: 'PENDING_HR',
-        hr: 'PENDING_HR',
+        employee: 'PENDING_MANAGER',
+        hr: 'PENDING_HR_FINAL',
         manager: 'PENDING_MANAGER',
         admin: 'PENDING_ADMIN',
         super_admin: 'APPROVED'
     }[r];
 
-    const n = state.requests.find(
-        x => x.status === target
-    );
+    const n = state.requests.find(x => x.status === target);
 
     let title = 'You are all caught up';
     let body = 'There is nothing waiting for your action right now.';
@@ -564,12 +577,20 @@ function employeePage() {
             <h2>Apply for leave</h2>
             <p>
               Start your request here.
-              It will enter HR review first.
+              Choose a leave type. Weekdays (Monday-Friday) are counted; public holidays are not excluded. The Manager decides first, and HR then performs a separate final review.
             </p>
           </div>
         </div>
 
         <form id="leaveForm" class="form-grid">
+
+          <div class="field wide">
+            <label>Leave type</label>
+            <select name="leave_type_code" id="leaveTypeSelect" required>
+              ${state.leaveTypes.map(t => `<option value="${escapeHtml(t.code)}" ${t.code === 'CL' ? 'selected' : ''}>${escapeHtml(t.code)} — ${escapeHtml(t.name)} (${Number(t.annual_allowance)} days/year)</option>`).join('')}
+            </select>
+            <div class="hint" id="leaveTypeBalance"></div>
+          </div>
 
           <div class="field">
             <label>Start date</label>
@@ -640,21 +661,20 @@ function employeePage() {
         <h2>Your approval path</h2>
 
         <p>
-          Every request moves through the same
-          five-tier sequence.
+          Every request goes to the Manager first. Whether the Manager approves or rejects, HR records a separate final review next. HR can veto Manager approval; a Manager rejection remains rejected.
         </p>
 
-        ${timeline('PENDING_HR')}
+        ${timeline('PENDING_MANAGER')}
 
         <div class="progress-wrap">
 
           <div class="progress-row">
             <span>Starts here</span>
-            <strong>25%</strong>
+            <strong>20%</strong>
           </div>
 
           <div class="progress">
-            <div style="width:25%"></div>
+            <div style="width:20%"></div>
           </div>
 
         </div>
@@ -662,25 +682,42 @@ function employeePage() {
       </section>
 
     </div>
+
+    <section class="card section balance-section">
+      <div class="section-head">
+        <div>
+          <div class="eyebrow">Annual entitlement</div>
+          <h2>My leave balances · ${new Date().getFullYear()}</h2>
+          <p>Pending requests reserve days until they are rejected. Weekdays are counted; public holidays are not excluded.</p>
+        </div>
+      </div>
+      <div class="balance-grid">
+        ${state.balances.filter(b => b.enabled).map(b => `
+          <article class="balance-card">
+            <div class="balance-code">${escapeHtml(b.code)}</div>
+            <div class="balance-name">${escapeHtml(b.name)}</div>
+            <div class="balance-number">${Number(b.remaining_days)} <span>remaining</span></div>
+            <div class="balance-foot">${Number(b.used_or_reserved_days)} used/reserved of ${Number(b.annual_allowance)} workday(s)</div>
+          </article>
+        `).join('') || '<div class="empty">No enabled leave types available.</div>'}
+      </div>
+    </section>
   `;
+}
+
+function canRoleReviewRequest(role, request) {
+    if (role === 'employee') return true;
+    if (role === 'hr') return request.status === 'PENDING_HR_FINAL';
+    if (role === 'manager') return request.status === 'PENDING_MANAGER';
+    if (role === 'admin') return request.status === 'PENDING_ADMIN';
+    if (role === 'super_admin') return true;
+    return false;
 }
 
 function queuePage() {
     const role = state.user.role;
     const filters = state.requests;
-    const relevant =
-        role === 'employee'
-            ? filters
-            : filters.filter(
-                r =>
-                    r.status ===
-                    ({
-                        hr: 'PENDING_HR',
-                        manager: 'PENDING_MANAGER',
-                        admin: 'PENDING_ADMIN',
-                        super_admin: null
-                    }[role])
-            );
+    const relevant = filters.filter(r => canRoleReviewRequest(role, r));
 
     return `
     <section class="card section">
@@ -713,12 +750,12 @@ function queuePage() {
               All statuses
             </option>
 
-            <option value="PENDING_HR">
-              Pending HR
-            </option>
-
             <option value="PENDING_MANAGER">
               Pending Manager
+            </option>
+
+            <option value="PENDING_HR_FINAL">
+              Pending HR final review
             </option>
 
             <option value="PENDING_ADMIN">
@@ -797,9 +834,21 @@ function render() {
 
     if (state.page === 'employee') {
         $('#content').innerHTML = employeePage();
-
         $('#leaveForm').onsubmit = submitLeave;
+        const typeSelect = $('#leaveTypeSelect');
+        if (typeSelect) {
+            typeSelect.onchange = updateLeaveTypeBalance;
+            updateLeaveTypeBalance();
+        }
+        return;
+    }
 
+    if (state.page === 'policies') {
+        $('#content').innerHTML = policiesPage();
+        $('#policyCreateForm').onsubmit = createLeavePolicy;
+        document.querySelectorAll('.policy-save').forEach(button => {
+            button.onclick = () => saveLeavePolicy(button.dataset.code);
+        });
         return;
     }
 
@@ -837,19 +886,7 @@ function renderRequestList() {
                 .includes(search)
     );
 
-    if (state.user.role !== 'employee') {
-        rows = rows.filter(
-            r =>
-                r.status ===
-                ({
-                    hr: 'PENDING_HR',
-                    manager: 'PENDING_MANAGER',
-                    admin: 'PENDING_ADMIN',
-                    super_admin: null
-                }[state.user.role]) ||
-                state.user.role === 'super_admin'
-        );
-    }
+    rows = rows.filter(r => canRoleReviewRequest(state.user.role, r));
 
     box.innerHTML = rows.length
         ? rows
@@ -858,12 +895,12 @@ function renderRequestList() {
 
                 if (
                     state.user.role === 'hr' &&
-                    r.status === 'PENDING_HR'
+                    r.status === 'PENDING_HR_FINAL'
                 ) {
                     action = `
               <button
                 class="btn primary"
-                onclick="openReview(${r.id}, 'hr')"
+                onclick="openReview(${r.id}, 'hr-final')"
               >
                 Review
               </button>
@@ -925,10 +962,107 @@ function renderRequestList() {
 
 async function loadRequests() {
     try {
-        state.requests =
-            await api('/api/leave/requests');
-
+        const [requests, leaveTypes, balanceResponse] = await Promise.all([
+            api('/api/leave/requests'),
+            api('/api/leave/types'),
+            api('/api/leave/balances')
+        ]);
+        state.requests = requests;
+        state.leaveTypes = leaveTypes;
+        state.balances = balanceResponse.balances || [];
+        if (['admin', 'super_admin'].includes(state.user?.role)) {
+            state.policies = await api('/api/admin/leave-policies');
+        }
         render();
+    } catch (e) {
+        toast(e.message);
+    }
+}
+
+function updateLeaveTypeBalance() {
+    const selectedCode = $('#leaveTypeSelect')?.value;
+    const policy = state.leaveTypes.find(type => type.code === selectedCode);
+    const balance = state.balances.find(item => item.code === selectedCode);
+    const target = $('#leaveTypeBalance');
+    if (!target || !policy) return;
+    target.textContent = balance
+        ? `${balance.remaining_days} of ${balance.annual_allowance} workday(s) remaining for ${balance.year}; ${balance.used_or_reserved_days} used or reserved.`
+        : `${policy.annual_allowance} workday(s) per calendar year.`;
+}
+
+function policiesPage() {
+    const rows = state.policies.map(policy => `
+      <div class="policy-row">
+        <div class="policy-code">${escapeHtml(policy.code)}</div>
+        <div class="field">
+          <label for="policy-name-${escapeHtml(policy.code)}">Name</label>
+          <input id="policy-name-${escapeHtml(policy.code)}" value="${escapeHtml(policy.name)}" maxlength="80" required>
+        </div>
+        <div class="field">
+          <label for="policy-days-${escapeHtml(policy.code)}">Annual workdays</label>
+          <input id="policy-days-${escapeHtml(policy.code)}" type="number" min="0" max="260" value="${Number(policy.annual_allowance)}" required>
+        </div>
+        <label class="policy-enabled"><input id="policy-enabled-${escapeHtml(policy.code)}" type="checkbox" ${policy.enabled ? 'checked' : ''}> Enabled</label>
+        <button type="button" class="btn primary policy-save" data-code="${escapeHtml(policy.code)}">Save</button>
+      </div>
+    `).join('');
+    return `
+      <div class="grid policies-layout">
+        <section class="card section">
+          <div class="section-head"><div><div class="eyebrow">Policy setup</div><h2>Add a leave type</h2><p>Codes are immutable after creation. Disabled types remain available for historical requests.</p></div></div>
+          <form id="policyCreateForm" class="form-grid">
+            <div class="field"><label for="new-policy-code">Code</label><input id="new-policy-code" name="code" minlength="2" maxlength="10" pattern="[A-Za-z][A-Za-z0-9_]{1,9}" placeholder="SL" required></div>
+            <div class="field"><label for="new-policy-name">Name</label><input id="new-policy-name" name="name" minlength="2" maxlength="80" placeholder="Sick Leave" required></div>
+            <div class="field"><label for="new-policy-days">Annual workdays</label><input id="new-policy-days" name="annual_allowance" type="number" min="0" max="260" value="10" required></div>
+            <label class="policy-enabled"><input name="enabled" type="checkbox" checked> Enabled for new requests</label>
+            <div class="wide"><button class="btn primary" type="submit">Create leave type</button></div>
+          </form>
+        </section>
+        <section class="card section">
+          <div class="section-head"><div><div class="eyebrow">Annual entitlement</div><h2>Existing leave types</h2><p>Weekdays, Monday-Friday, are counted. Public holidays are not excluded.</p></div></div>
+          <div class="policy-list">${rows || '<div class="empty">No leave types configured.</div>'}</div>
+        </section>
+      </div>
+    `;
+}
+
+async function createLeavePolicy(event) {
+    event.preventDefault();
+    const form = event.currentTarget;
+    const values = new FormData(form);
+    const payload = {
+        code: String(values.get('code') || '').trim().toUpperCase(),
+        name: String(values.get('name') || '').trim(),
+        annual_allowance: Number(values.get('annual_allowance')),
+        enabled: values.get('enabled') === 'on'
+    };
+    try {
+        await api('/api/admin/leave-policies', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload)
+        });
+        await loadRequests();
+        toast(`Leave type ${payload.code} created`, true);
+    } catch (e) {
+        toast(e.message);
+    }
+}
+
+async function saveLeavePolicy(code) {
+    const payload = {
+        name: $(`#policy-name-${code}`).value.trim(),
+        annual_allowance: Number($(`#policy-days-${code}`).value),
+        enabled: $(`#policy-enabled-${code}`).checked
+    };
+    try {
+        await api(`/api/admin/leave-policies/${encodeURIComponent(code)}`, {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload)
+        });
+        await loadRequests();
+        toast(`Leave policy ${code} saved`, true);
     } catch (e) {
         toast(e.message);
     }
@@ -1051,6 +1185,9 @@ function viewRequest(id) {
                 ${statusLabel(r.status)}
               </span>
             </dd>
+
+            <dt>Manager decision</dt>
+            <dd>${r.manager_approved === true ? 'Approved' : r.manager_approved === false ? 'Rejected' : 'Awaiting Manager review'}</dd>
 
             <dt>Created</dt>
             <dd>${escapeHtml(r.created_at || '')}</dd>
@@ -1184,7 +1321,11 @@ function openReview(id, kind) {
             <div class="eyebrow">
               ${kind === 'admin'
             ? 'Final decision'
-            : 'Review'}
+            : kind === 'hr-final'
+                ? 'HR final review'
+                : kind === 'manager'
+                    ? 'Manager decision'
+                    : 'Review'}
               · Request #${id}
             </div>
 
@@ -1206,6 +1347,7 @@ function openReview(id, kind) {
           ${escapeHtml(r.start_date)}
           →
           ${escapeHtml(r.end_date)}
+          · ${escapeHtml(r.leave_type_code || 'CL')} · ${Number(r.requested_days || 0)} workday(s)
           · Employee #${escapeHtml(r.employee_id)}
         </p>
 
@@ -1222,6 +1364,8 @@ function openReview(id, kind) {
             maxlength="2000"
             placeholder="Add a clear decision reason"
           ></textarea>
+          ${kind === 'manager' ? '<p class="hint">Your decision is recorded independently of HR. HR will review the request after you approve or reject it.</p>' : ''}
+          ${kind === 'hr-final' ? (r.manager_approved === false ? '<p class="hint">The Manager rejected this request. HR must still record a final review; confirming it keeps the request rejected.</p>' : '<p class="hint">The Manager approved this request. HR must now approve it for Admin review or reject it.</p>') : ''}
         </div>
 
         <div id="reviewAlert"></div>
@@ -1245,7 +1389,7 @@ function openReview(id, kind) {
             class="btn primary"
             onclick="submitReview(${id}, '${kind}', true)"
           >
-            Approve
+            ${kind === 'hr-final' && r.manager_approved === false ? 'Confirm rejection' : kind === 'hr-final' ? 'Confirm for Admin' : 'Approve'}
           </button>
         </div>
 
@@ -1271,6 +1415,7 @@ async function submitReview(
 
     const endpoint = {
         hr: `/api/leave/${id}/hr-review`,
+        'hr-final': `/api/leave/${id}/hr-review`,
         manager: `/api/leave/${id}/manager-approve`,
         admin: `/api/leave/${id}/admin-finalize`
     }[kind];
@@ -1294,9 +1439,13 @@ async function submitReview(
         await loadRequests();
 
         toast(
-            approved
-                ? 'Decision recorded'
-                : 'Request rejected',
+            kind === 'manager'
+                ? `Manager ${approved ? 'approval' : 'rejection'} recorded; HR review is next`
+                : approved && kind === 'hr-final' && state.requests.find(x => x.id === id)?.manager_approved === false
+                    ? 'Manager rejection confirmed; request remains rejected'
+                    : approved
+                        ? 'Decision recorded'
+                        : 'Request rejected',
             true
         );
 

@@ -104,3 +104,23 @@ Failure screenshots are stored in `test-results/screenshots/`.
 - `nginx/default.conf` — reverse proxy configuration
 - `selenium_tests/` — browser quality tests
 - `ansible/site.yml` — provisioning
+
+## Week 15 enhancements: configurable leave types and Manager-first approval
+
+The application seeds two editable initial policies: **CL (Casual Leave, 12 workdays/year)** and **EL (Earned Leave, 15 workdays/year)**. These are example defaults, not fixed company policy. Admin or Super Admin can change yearly allowances, enable/disable existing types, and add new types from the **Leave policies** navigation item.
+
+Employees select a leave type when submitting a request. Balances are calculated per calendar year using weekdays (Monday-Friday); public holidays are not excluded. A request awaiting a decision reserves its days; rejected requests release the reservation. If a requested leave exceeds the available allowance, the API rejects the submission.
+
+The approval path is now:
+
+```text
+Employee submits leave
+  -> Manager approves or rejects first
+  -> HR performs a mandatory final review of the Manager decision
+  -> Admin final decision, only after both approvals
+  -> Super Admin notification
+```
+
+Every new request starts at `PENDING_MANAGER`. The Manager can approve or reject without waiting for HR; either decision is stored separately and moves the request to `PENDING_HR_FINAL`. HR must then record a final review. If the Manager approved, HR can pass it to Admin or veto it by rejecting. If the Manager rejected, HR confirms the rejection and the request remains `REJECTED`. Admin can finalize only requests that both Manager and HR have approved.
+
+See `WEEK15_ENHANCEMENTS.md` for API details, migration behavior, rules and verification steps.

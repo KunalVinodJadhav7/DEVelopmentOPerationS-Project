@@ -1,5 +1,6 @@
 from enum import Enum
 
+
 class UserRole(str, Enum):
     EMPLOYEE = 'employee'
     HR = 'hr'
@@ -7,9 +8,11 @@ class UserRole(str, Enum):
     ADMIN = 'admin'
     SUPER_ADMIN = 'super_admin'
 
+
 class LeaveStatus(str, Enum):
     PENDING_HR = 'PENDING_HR'
     PENDING_MANAGER = 'PENDING_MANAGER'
+    PENDING_HR_FINAL = 'PENDING_HR_FINAL'
     PENDING_ADMIN = 'PENDING_ADMIN'
     APPROVED = 'APPROVED'
     REJECTED = 'REJECTED'
