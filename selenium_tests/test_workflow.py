@@ -488,7 +488,7 @@ class LeaveApprovalWorkflowTest(unittest.TestCase):
         self._submit_leave_request(reason_text)
 
         # Confirm the request appears under My requests as PENDING MANAGER.
-        self.wait_click("//nav[@id='nav']//button[normalize-space()='My requests']")
+        self.wait_click("#nav button[onclick*='requests']")
         self.wait.until(
             lambda driver: (
                 reason_text in driver.find_element(By.TAG_NAME, "body").text
@@ -611,7 +611,7 @@ class LeaveApprovalWorkflowTest(unittest.TestCase):
             lambda driver: decision_text in driver.find_element(By.TAG_NAME, "body").text
         )
 
-        self.wait_click("//nav[@id='nav']//button[normalize-space()='Audit trail']")
+        self.wait_click("#nav button[onclick*='audit']")
 
         expected_status = "PENDING ADMIN" if approved and not manager_rejected else "REJECTED"
         self.wait.until(
@@ -709,7 +709,7 @@ class LeaveApprovalWorkflowTest(unittest.TestCase):
             alert.text,
         )
 
-        self.wait_click("//nav[@id='nav']//button[normalize-space()='My requests']")
+        self.wait_click("#nav button[onclick*='requests']")
 
         self.wait.until(
             lambda driver: (
@@ -855,7 +855,7 @@ class LeaveApprovalWorkflowTest(unittest.TestCase):
 
         # Audit Trail is the third navigation button and shows request
         # status/history for this role.
-        self.wait_click("//nav[@id='nav']//button[normalize-space()='Audit trail']")
+        self.wait_click("#nav button[onclick*='audit']")
 
         expected_status = "PENDING HR FINAL"
 
@@ -935,7 +935,7 @@ class LeaveApprovalWorkflowTest(unittest.TestCase):
         self.wait.until(lambda driver: decision_text in driver.find_element(By.TAG_NAME, "body").text)
         # Once HR confirms or vetoes, the item leaves the action queue. Check
         # the Audit Trail page to verify its new status.
-        self.wait_click("//nav[@id='nav']//button[normalize-space()='Audit trail']")
+        self.wait_click("#nav button[onclick*='audit']")
         expected_status = "PENDING ADMIN" if approved and not manager_rejected else "REJECTED"
         self.wait.until(lambda driver: (
             reason_text in driver.find_element(By.TAG_NAME, "body").text
@@ -1042,7 +1042,7 @@ class LeaveApprovalWorkflowTest(unittest.TestCase):
         )
 
         # Verify through Audit Trail.
-        self.wait_click("//nav[@id='nav']//button[normalize-space()='Audit trail']")
+        self.wait_click("#nav button[onclick*='audit']")
 
         self.wait.until(
             lambda driver: (
@@ -1148,7 +1148,7 @@ class LeaveApprovalWorkflowTest(unittest.TestCase):
         )
 
         # Open Audit Trail and inspect the request audit.
-        self.wait_click("//nav[@id='nav']//button[normalize-space()='Audit trail']")
+        self.wait_click("#nav button[onclick*='audit']")
 
         self.wait.until(
             lambda driver: (
@@ -1291,7 +1291,7 @@ class LeaveApprovalWorkflowTest(unittest.TestCase):
         )
 
         # Employee queue is the third navigation button.
-        self.wait_click("//nav[@id='nav']//button[normalize-space()='My requests']")
+        self.wait_click("#nav button[onclick*='requests']")
 
         request_card = self.wait.until(
             EC.presence_of_element_located(
@@ -1392,7 +1392,7 @@ class LeaveApprovalWorkflowTest(unittest.TestCase):
         )
 
         # Verify initial state.
-        self.wait_click("//nav[@id='nav']//button[normalize-space()='My requests']")
+        self.wait_click("#nav button[onclick*='requests']")
 
         self.wait.until(
             lambda driver: (
