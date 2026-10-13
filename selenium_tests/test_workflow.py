@@ -103,13 +103,21 @@ class LeaveApprovalWorkflowTest(unittest.TestCase):
         except Exception:
             pass
 
-    def wait_click(self, css):
-        """Wait until a CSS-selected element is clickable."""
+    def wait_click(self, selector):
+        """Wait for a CSS or XPath-selected element, click it, and return it."""
+
+        # Workflow tests use CSS selectors for most controls, but XPath for
+        # text-based navigation items. Choose the Selenium locator strategy
+        # from the selector format so XPath is not incorrectly parsed as CSS.
+        selector = selector.strip()
+        locator_by = (
+            By.XPATH
+            if selector.startswith(("//", ".//", "(//", "(.//"))
+            else By.CSS_SELECTOR
+        )
 
         element = self.wait.until(
-            EC.element_to_be_clickable(
-                (By.CSS_SELECTOR, css)
-            )
+            EC.element_to_be_clickable((locator_by, selector))
         )
 
         element.click()
