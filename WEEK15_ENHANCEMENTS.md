@@ -2,12 +2,12 @@
 
 ## Scope
 
-The FastAPI OpenAPI version is updated from `1.2.0` to `1.3.0` for this feature release.
+The FastAPI OpenAPI version is updated from `1.2.0` to `1.4.0` for this feature release.
 
 This change set adds two post-review enhancements while preserving the existing FastAPI, PostgreSQL/SQLite, frontend, Gradle, Jenkins, Docker Compose, Nginx and Ansible structure:
 
 1. Configurable leave types and annual entitlements (initial examples: CL and EL).
-2. Manager decision first (approve or reject), followed by a mandatory HR final review before Admin finalization.
+2. Model A: Manager decides first; HR has a limited, reason-required veto for policy, leave-balance, or legal/compliance concerns, followed by Admin finalization only after HR clears a Manager approval.
 
 ## 1. Configurable leave types and balances
 
@@ -80,38 +80,54 @@ APPROVED or REJECTED
 Employee can see final result and audit history
 ```
 
-The Manager can approve or reject immediately after submission; HR does not need to act first. Both Manager decisions advance to `PENDING_HR_FINAL`, so HR receives a separate final-review item regardless of the Manager outcome. If the Manager approved, HR may allow the request to proceed to Admin or veto it by rejecting. If the Manager rejected, HR must still record a final review, but an HR approval confirms the rejection rather than overriding it. The Admin endpoint accepts only `PENDING_ADMIN`, so it cannot bypass HR. Each decision is recorded in the audit trail, including `MANAGER_APPROVED_PENDING_HR_REVIEW`, `MANAGER_REJECTED_PENDING_HR_REVIEW`, `HR_FINAL_REVIEW_APPROVED`, `HR_FINAL_REVIEW_REJECTED`, and `HR_CONFIRMED_MANAGER_REJECTION`.
+The Manager can approve or reject immediately after submission; HR does not need to act first. Both Manager decisions advance to `PENDING_HR_FINAL`, so HR receives a separate final-review item regardless of the Manager outcome. If the Manager approved, HR may allow the request to proceed to Admin or veto it by rejecting. If the Manager rejected, HR must still record a final review, but an HR approval confirms the rejection rather than overriding it. The Admin endpoint accepts only `PENDING_ADMIN`, so it cannot bypass HR. Each decision is recorded in the audit trail, including `MANAGER_APPROVED_PENDING_HR_REVIEW`, `MANAGER_REJECTED_PENDING_HR_REVIEW`, `HR_FINAL_REVIEW_APPROVED`, `HR_VETOED_MANAGER_APPROVAL`, and `HR_CONFIRMED_MANAGER_REJECTION`.
 
 The frontend exposes Manager approve/reject actions for `PENDING_MANAGER` and the HR **Review** action for `PENDING_HR_FINAL`. Manager's independent decision is displayed in request cards and details.
 
-## 3. Database compatibility
+## 3. Model A: limited HR veto contract
+
+The Manager makes the operational decision first, considering workload, staffing, and team priorities. The Manager records a nonblank explanation of at least 10 characters. Each Manager decision is independently recorded in the audit trail.
+
+HR does not make a second unrestricted business decision. If the Manager approved the request, HR may either pass it to Admin or veto only for one of these structured categories:
+
+- `policy_violation` — conflict with a documented leave policy.
+- `insufficient_leave_balance` — the employee lacks available entitlement for the requested period.
+- `legal_compliance` — legal, regulatory, or compliance issue.
+
+Every veto must select one permitted category and submit a specific, nonblank reason of at least 10 characters. The category is stored in `leave_requests.hr_veto_category`; the reason is stored in `hr_comments`; and both category and reason are included in the audit event `HR_VETOED_MANAGER_APPROVAL`. An unknown category, missing category, whitespace-only reason, or too-short reason is rejected by the API. UI checks are convenience only; the API is authoritative.
+
+If the Manager rejected the request, HR can record a confirmation of that rejection but cannot turn it into an approval or issue a separate veto. The HR screen therefore offers only **Confirm rejection** in this case. A Manager approval that passes HR review moves to `PENDING_ADMIN`; an HR veto moves directly to `REJECTED` and cannot be overridden by Admin. Manager, HR, and Admin comment fields are trimmed and whitespace-only comments are rejected.
+
+The leave-request migration adds `hr_veto_category` as a nullable column, preserving existing request history. Existing requests receive no invented category; the field remains `NULL` unless a new, qualifying HR veto is recorded.
+
+## 4. Database compatibility
 
 At startup, SQLAlchemy creates the new `leave_policies` table. An additive migration checks whether `leave_requests.leave_type_code` exists and adds it with the default value `CL` when an older database is detected. PostgreSQL's existing `status` column is widened to `VARCHAR(20)` when necessary for the new `PENDING_HR_FINAL` status. A versioned migration moves legacy `PENDING_HR` requests into the Manager queue, routes prior Admin-ready requests through the new HR final-review queue, and stores historical Manager approval where it can be inferred safely. The migration marker prevents requests from being re-queued on subsequent restarts. Existing requests therefore remain valid and are associated with CL unless an administrator updates records separately.
 
 Before deploying against important data, take a normal database backup. The migration is additive and does not drop tables or volumes.
 
-## 4. Modified files
+## 5. Modified files
 
-- `app/models.py` — workflow statuses for Manager-first and HR-final review.
-- `app/orm_models.py` — `LeavePolicy`, leave type code, and stored Manager decision on requests.
-- `app/schemas.py` — leave-type and leave-policy validation schemas.
-- `app/main.py` — policy seeding/migration, balance enforcement, policy APIs and Manager-first/HR-final state transitions.
-- `frontend/app.js` — type selector, balance display, admin policy page and HR veto action.
+- `app/models.py` — workflow statuses and the allow-listed HR veto category enum.
+- `app/orm_models.py` — `LeavePolicy`, leave type code, Manager decision, and persisted HR veto category.
+- `app/schemas.py` — leave-type/policy schemas, trimmed decision comments, and HR veto category validation.
+- `app/main.py` — policy seeding/migration, balance enforcement, Model A server-side veto rules, and Manager-first/HR-final state transitions.
+- `frontend/app.js` — type selector, balance display, admin policy page, limited HR veto category selector, and recorded-rationale display.
 - `frontend/styles.css` — balance/policy layouts and new status styling.
-- `tests/test_api.py` — tests for default policies, configurable types, reserved balances, Manager-first decisions, HR veto and Manager rejection confirmation.
-- `selenium_tests/test_workflow.py` — updated end-to-end workflow and explicit HR veto rejection coverage.
+- `tests/test_api.py` — tests for configurable policies/balances, Manager-first transitions, required HR veto categories/reasons, and Manager rejection confirmation.
+- `selenium_tests/test_workflow.py` — CSS/XPath-compatible click helper, current Manager toast assertions, and HR veto category coverage.
 - `README.md` — new behavior summarized.
 
 The existing `Jenkinsfile`, `Dockerfile`, `docker-compose.yml`, Ansible playbook and Gradle build configuration were not changed by this patch. Keep those working files as-is.
 
-## 5. Verification
+## 6. Verification
 
 Run locally from the repository root:
 
 ```powershell
-python -m pytest tests/test_api.py -q
+py -m pytest tests/test_api.py -q
 node --check frontend/app.js
-python -m py_compile app/main.py app/models.py app/orm_models.py app/schemas.py
+py -m py_compile app/main.py app/models.py app/orm_models.py app/schemas.py
 ```
 
 For the full project pipeline, run the existing Jenkins job with the normal project parameters and verify unit tests, Gradle, Docker deployment, Ansible's second-run idempotency gate, `/health` and Selenium. The updated Selenium workflow requires a new browser test to verify the mandatory HR veto screen; it should be run in the project's existing Selenium-capable environment.

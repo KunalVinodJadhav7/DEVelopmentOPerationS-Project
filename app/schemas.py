@@ -1,6 +1,6 @@
 from datetime import date
 from pydantic import BaseModel, EmailStr, Field, model_validator, field_validator
-from .models import UserRole
+from .models import UserRole, HRVetoCategory
 
 
 class LeaveSubmitInput(BaseModel):
@@ -24,6 +24,15 @@ class LeaveSubmitInput(BaseModel):
 class ReviewInput(BaseModel):
     approved: bool
     comments: str = Field(min_length=1, max_length=2000)
+    # Required by the HR endpoint only when it vetoes a Manager approval.
+    veto_category: HRVetoCategory | None = None
+
+    @field_validator('comments', mode='before')
+    @classmethod
+    def trim_review_comments(cls, value):
+        if isinstance(value, str):
+            return value.strip()
+        return value
 
 
 class LeavePolicyCreate(BaseModel):

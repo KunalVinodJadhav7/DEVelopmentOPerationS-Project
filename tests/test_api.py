@@ -254,12 +254,22 @@ def test_hr_can_veto_after_manager_approval_and_admin_cannot_bypass_it():
 
     hr_veto = client.patch(
         f"/api/leave/{leave_id}/hr-review",
-        json={"approved": False, "comments": "HR veto: policy concern"},
+        json={"approved": False, "comments": "The request conflicts with the documented leave policy.", "veto_category": "policy_violation"},
         headers={"Authorization": f"Bearer {hr_token}"},
     )
     assert hr_veto.status_code == 200, hr_veto.text
     assert hr_veto.json()["status"] == "REJECTED"
-    assert hr_veto.json()["action"] == "HR_FINAL_REVIEW_REJECTED"
+    assert hr_veto.json()["action"] == "HR_VETOED_MANAGER_APPROVAL"
+    assert hr_veto.json()["hr_veto_category"] == "policy_violation"
+
+    request_rows = client.get(
+        "/api/leave/requests",
+        headers={"Authorization": f"Bearer {employee_token}"},
+    )
+    assert request_rows.status_code == 200, request_rows.text
+    request_row = next(row for row in request_rows.json() if row["id"] == leave_id)
+    assert request_row["hr_veto_category"] == "policy_violation"
+    assert request_row["hr_comments"] == "The request conflicts with the documented leave policy."
 
     audit = client.get(
         f"/api/leave/{leave_id}/audit",
@@ -268,7 +278,121 @@ def test_hr_can_veto_after_manager_approval_and_admin_cannot_bypass_it():
     assert audit.status_code == 200, audit.text
     actions = [row["action_performed"] for row in audit.json()]
     assert "MANAGER_APPROVED_PENDING_HR_REVIEW" in actions
-    assert "HR_FINAL_REVIEW_REJECTED" in actions
+    assert "HR_VETOED_MANAGER_APPROVAL" in actions
+    veto_event = next(row for row in audit.json() if row["action_performed"] == "HR_VETOED_MANAGER_APPROVAL")
+    assert "Policy violation" in veto_event["comments"]
+    assert "documented leave policy" in veto_event["comments"]
+
+
+def test_hr_veto_requires_allowed_category_and_specific_reason():
+    _, employee_token = _register_unique_user("employee")
+    _, hr_token = _register_unique_user("hr")
+    _, manager_token = _register_unique_user("manager")
+    start, _ = _weekday_pair()
+
+    submitted = client.post(
+        "/api/leave/submit",
+        data={"start_date": start.isoformat(), "end_date": start.isoformat(), "reason": "HR veto validation test", "leave_type_code": "CL"},
+        headers={"Authorization": f"Bearer {employee_token}"},
+    )
+    assert submitted.status_code == 200, submitted.text
+    leave_id = submitted.json()["id"]
+
+    blank_manager_reason = client.patch(
+        f"/api/leave/{leave_id}/manager-approve",
+        json={"approved": True, "comments": "          "},
+        headers={"Authorization": f"Bearer {manager_token}"},
+    )
+    assert blank_manager_reason.status_code == 422
+
+    manager_using_hr_veto_category = client.patch(
+        f"/api/leave/{leave_id}/manager-approve",
+        json={"approved": True, "comments": "Approved based on team coverage and workload.", "veto_category": "policy_violation"},
+        headers={"Authorization": f"Bearer {manager_token}"},
+    )
+    assert manager_using_hr_veto_category.status_code == 422
+
+    manager = client.patch(
+        f"/api/leave/{leave_id}/manager-approve",
+        json={"approved": True, "comments": "Approved based on team coverage and workload."},
+        headers={"Authorization": f"Bearer {manager_token}"},
+    )
+    assert manager.status_code == 200, manager.text
+
+    missing_category = client.patch(
+        f"/api/leave/{leave_id}/hr-review",
+        json={"approved": False, "comments": "Detailed reason for veto is here."},
+        headers={"Authorization": f"Bearer {hr_token}"},
+    )
+    assert missing_category.status_code == 422
+
+    whitespace_reason = client.patch(
+        f"/api/leave/{leave_id}/hr-review",
+        json={"approved": False, "comments": "          ", "veto_category": "policy_violation"},
+        headers={"Authorization": f"Bearer {hr_token}"},
+    )
+    assert whitespace_reason.status_code == 422
+
+    short_reason = client.patch(
+        f"/api/leave/{leave_id}/hr-review",
+        json={"approved": False, "comments": "Policy", "veto_category": "policy_violation"},
+        headers={"Authorization": f"Bearer {hr_token}"},
+    )
+    assert short_reason.status_code == 422
+
+    invalid_category = client.patch(
+        f"/api/leave/{leave_id}/hr-review",
+        json={"approved": False, "comments": "This is a sufficiently specific reason.", "veto_category": "performance_concern"},
+        headers={"Authorization": f"Bearer {hr_token}"},
+    )
+    assert invalid_category.status_code == 422
+
+    valid_veto = client.patch(
+        f"/api/leave/{leave_id}/hr-review",
+        json={"approved": False, "comments": "There is insufficient available leave balance for this period.", "veto_category": "insufficient_leave_balance"},
+        headers={"Authorization": f"Bearer {hr_token}"},
+    )
+    assert valid_veto.status_code == 200, valid_veto.text
+    assert valid_veto.json()["status"] == "REJECTED"
+    assert valid_veto.json()["hr_veto_category"] == "insufficient_leave_balance"
+
+
+def test_hr_cannot_issue_a_veto_when_manager_rejected():
+    _, employee_token = _register_unique_user("employee")
+    _, hr_token = _register_unique_user("hr")
+    _, manager_token = _register_unique_user("manager")
+    start, _ = _weekday_pair()
+
+    submitted = client.post(
+        "/api/leave/submit",
+        data={"start_date": start.isoformat(), "end_date": start.isoformat(), "reason": "Manager rejection cannot be vetoed", "leave_type_code": "CL"},
+        headers={"Authorization": f"Bearer {employee_token}"},
+    )
+    assert submitted.status_code == 200, submitted.text
+    leave_id = submitted.json()["id"]
+
+    manager = client.patch(
+        f"/api/leave/{leave_id}/manager-approve",
+        json={"approved": False, "comments": "Rejected due to staffing coverage requirements."},
+        headers={"Authorization": f"Bearer {manager_token}"},
+    )
+    assert manager.status_code == 200, manager.text
+
+    invalid_veto = client.patch(
+        f"/api/leave/{leave_id}/hr-review",
+        json={"approved": False, "comments": "This is a policy violation veto.", "veto_category": "policy_violation"},
+        headers={"Authorization": f"Bearer {hr_token}"},
+    )
+    assert invalid_veto.status_code == 400
+
+    confirmation = client.patch(
+        f"/api/leave/{leave_id}/hr-review",
+        json={"approved": True, "comments": "HR confirms the Manager rejection."},
+        headers={"Authorization": f"Bearer {hr_token}"},
+    )
+    assert confirmation.status_code == 200, confirmation.text
+    assert confirmation.json()["status"] == "REJECTED"
+    assert confirmation.json()["action"] == "HR_CONFIRMED_MANAGER_REJECTION"
 
 
 def test_manager_rejection_still_goes_to_hr_and_cannot_be_overridden():

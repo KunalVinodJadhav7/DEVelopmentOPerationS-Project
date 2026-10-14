@@ -661,7 +661,7 @@ function employeePage() {
         <h2>Your approval path</h2>
 
         <p>
-          Every request goes to the Manager first. Whether the Manager approves or rejects, HR records a separate final review next. HR can veto Manager approval; a Manager rejection remains rejected.
+          Every request goes to the Manager first. The Manager decides based on workload, staffing, and team priorities. HR then reviews: only a Manager approval can be vetoed, and only for a policy violation, insufficient leave balance, or legal/compliance issue. Every veto needs a category and specific reason; a Manager rejection remains rejected.
         </p>
 
         ${timeline('PENDING_MANAGER')}
@@ -1189,6 +1189,17 @@ function viewRequest(id) {
             <dt>Manager decision</dt>
             <dd>${r.manager_approved === true ? 'Approved' : r.manager_approved === false ? 'Rejected' : 'Awaiting Manager review'}</dd>
 
+            <dt>Manager rationale</dt>
+            <dd>${escapeHtml(r.manager_comments || 'Not recorded yet')}</dd>
+
+            <dt>HR review comments</dt>
+            <dd>${escapeHtml(r.hr_comments || 'Not recorded yet')}</dd>
+
+            ${r.hr_veto_category ? `
+              <dt>HR veto category</dt>
+              <dd>${escapeHtml({policy_violation: 'Policy violation', insufficient_leave_balance: 'Insufficient leave balance', legal_compliance: 'Legal/compliance issue'}[r.hr_veto_category] || r.hr_veto_category)}</dd>
+            ` : ''}
+
             <dt>Created</dt>
             <dd>${escapeHtml(r.created_at || '')}</dd>
 
@@ -1364,9 +1375,22 @@ function openReview(id, kind) {
             maxlength="2000"
             placeholder="Add a clear decision reason"
           ></textarea>
-          ${kind === 'manager' ? '<p class="hint">Your decision is recorded independently of HR. HR will review the request after you approve or reject it.</p>' : ''}
-          ${kind === 'hr-final' ? (r.manager_approved === false ? '<p class="hint">The Manager rejected this request. HR must still record a final review; confirming it keeps the request rejected.</p>' : '<p class="hint">The Manager approved this request. HR must now approve it for Admin review or reject it.</p>') : ''}
+          ${kind === 'manager' ? '<p class="hint">Decide first based on workload, staffing, and team priorities. Record a clear rationale. HR performs a separate, limited policy/compliance review afterward.</p>' : ''}
+          ${kind === 'hr-final' ? (r.manager_approved === false ? '<p class="hint">The Manager rejected this request. Record a final review to confirm the rejection. HR cannot convert a Manager rejection into an approval or issue a second veto.</p>' : '<p class="hint">The Manager approved this request. Approve it for Admin review, or veto only for a policy violation, insufficient leave balance, or legal/compliance issue. A veto category and a specific reason are required.</p>') : ''}
         </div>
+
+        ${kind === 'hr-final' && r.manager_approved === true ? `
+          <div class="field" style="margin-top:12px">
+            <label for="hrVetoCategory">HR veto category (required only when rejecting)</label>
+            <select id="hrVetoCategory">
+              <option value="">Select a permitted reason category</option>
+              <option value="policy_violation">Policy violation</option>
+              <option value="insufficient_leave_balance">Insufficient leave balance</option>
+              <option value="legal_compliance">Legal/compliance issue</option>
+            </select>
+            <p class="hint">For a veto, explain the specific policy, balance, or compliance issue in Decision comments (at least 10 characters).</p>
+          </div>
+        ` : ''}
 
         <div id="reviewAlert"></div>
 
@@ -1378,12 +1402,14 @@ function openReview(id, kind) {
             margin-top:16px
           "
         >
-          <button
-            class="btn danger"
-            onclick="submitReview(${id}, '${kind}', false)"
-          >
-            Reject
-          </button>
+          ${kind === 'hr-final' && r.manager_approved === false ? '' : `
+            <button
+              class="btn danger"
+              onclick="submitReview(${id}, '${kind}', false)"
+            >
+              Reject
+            </button>
+          `}
 
           <button
             class="btn primary"
@@ -1403,14 +1429,32 @@ async function submitReview(
     kind,
     approved
 ) {
-    const comments =
-        $('#reviewComments').value.trim();
+    const comments = $('#reviewComments').value.trim();
 
     if (!comments) {
         $('#reviewAlert').innerHTML =
             '<div class="alert error">Please enter comments before deciding.</div>';
-
         return;
+    }
+
+    const request = state.requests.find(x => x.id === id);
+    const isHrVeto = kind === 'hr-final'
+        && request?.manager_approved === true
+        && approved === false;
+    let vetoCategory = null;
+
+    if (isHrVeto) {
+        vetoCategory = $('#hrVetoCategory')?.value || '';
+        if (!vetoCategory) {
+            $('#reviewAlert').innerHTML =
+                '<div class="alert error">Select a permitted HR veto category.</div>';
+            return;
+        }
+        if (comments.length < 10) {
+            $('#reviewAlert').innerHTML =
+                '<div class="alert error">Provide a specific HR veto reason of at least 10 characters.</div>';
+            return;
+        }
     }
 
     const endpoint = {
@@ -1420,40 +1464,37 @@ async function submitReview(
         admin: `/api/leave/${id}/admin-finalize`
     }[kind];
 
+    const payload = { approved, comments };
+    if (isHrVeto) payload.veto_category = vetoCategory;
+
     try {
-        await api(endpoint, {
+        const result = await api(endpoint, {
             method: 'PATCH',
-
-            headers: {
-                'Content-Type': 'application/json'
-            },
-
-            body: JSON.stringify({
-                approved,
-                comments
-            })
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload)
         });
 
         closeModal();
-
         await loadRequests();
 
         toast(
             kind === 'manager'
                 ? `Manager ${approved ? 'approval' : 'rejection'} recorded; HR review is next`
-                : approved && kind === 'hr-final' && state.requests.find(x => x.id === id)?.manager_approved === false
-                    ? 'Manager rejection confirmed; request remains rejected'
-                    : approved
-                        ? 'Decision recorded'
-                        : 'Request rejected',
+                : result.action === 'HR_VETOED_MANAGER_APPROVAL'
+                    ? 'Request rejected — HR veto recorded'
+                    : approved && kind === 'hr-final' && request?.manager_approved === false
+                        ? 'Manager rejection confirmed; request remains rejected'
+                        : approved
+                            ? 'Decision recorded'
+                            : 'Request rejected',
             true
         );
-
     } catch (e) {
         $('#reviewAlert').innerHTML =
             `<div class="alert error">${escapeHtml(e.message)}</div>`;
     }
 }
+
 
 async function notifyEmployee(id) {
     try {

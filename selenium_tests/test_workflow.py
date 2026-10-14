@@ -575,8 +575,13 @@ class LeaveApprovalWorkflowTest(unittest.TestCase):
         comments.send_keys(
             "Selenium HR approval test decision."
             if approved
-            else "Selenium HR rejection test decision."
+            else "Specific HR veto reason: documented leave policy conflict."
         )
+
+        if not approved and not manager_rejected:
+            Select(self.wait.until(
+                EC.visibility_of_element_located((By.ID, "hrVetoCategory"))
+            )).select_by_value("policy_violation")
 
         if approved:
             decision_text = (
@@ -820,13 +825,13 @@ class LeaveApprovalWorkflowTest(unittest.TestCase):
         )
 
         if approved:
-            decision_text = "Decision recorded"
+            decision_text = "Manager approval recorded; HR review is next"
             button_locator = (
                 By.XPATH,
                 "//button[normalize-space()='Approve']",
             )
         else:
-            decision_text = "Request rejected"
+            decision_text = "Manager rejection recorded; HR review is next"
             button_locator = (
                 By.XPATH,
                 "//button[normalize-space()='Reject']",
@@ -919,8 +924,12 @@ class LeaveApprovalWorkflowTest(unittest.TestCase):
         )
         comments.send_keys(
             "Selenium HR final review passed."
-            if approved else "Selenium HR final review rejected the request."
+            if approved else "Specific HR veto reason: documented leave policy conflict."
         )
+        if not approved and not manager_rejected:
+            Select(self.wait.until(
+                EC.visibility_of_element_located((By.ID, "hrVetoCategory"))
+            )).select_by_value("policy_violation")
         button_text = ("Confirm rejection" if manager_rejected else "Confirm for Admin") if approved else "Reject"
         self.wait.until(EC.element_to_be_clickable((
             By.XPATH, f"//button[normalize-space()='{button_text}']"

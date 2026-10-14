@@ -48,6 +48,8 @@ class LeaveRequest(Base):
     document_name: Mapped[str | None] = mapped_column(String(255))
     document_path: Mapped[str | None] = mapped_column(String(500))
     hr_comments: Mapped[str | None] = mapped_column(Text)
+    # Structured category is populated only when HR vetoes a Manager approval.
+    hr_veto_category: Mapped[str | None] = mapped_column(String(50), nullable=True)
     manager_comments: Mapped[str | None] = mapped_column(Text)
     manager_approved: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     admin_notes: Mapped[str | None] = mapped_column(Text)

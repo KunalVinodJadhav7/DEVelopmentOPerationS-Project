@@ -9,6 +9,12 @@ class UserRole(str, Enum):
     SUPER_ADMIN = 'super_admin'
 
 
+class HRVetoCategory(str, Enum):
+    POLICY_VIOLATION = 'policy_violation'
+    INSUFFICIENT_LEAVE_BALANCE = 'insufficient_leave_balance'
+    LEGAL_COMPLIANCE = 'legal_compliance'
+
+
 class LeaveStatus(str, Enum):
     PENDING_HR = 'PENDING_HR'
     PENDING_MANAGER = 'PENDING_MANAGER'

@@ -124,3 +124,8 @@ Employee submits leave
 Every new request starts at `PENDING_MANAGER`. The Manager can approve or reject without waiting for HR; either decision is stored separately and moves the request to `PENDING_HR_FINAL`. HR must then record a final review. If the Manager approved, HR can pass it to Admin or veto it by rejecting. If the Manager rejected, HR confirms the rejection and the request remains `REJECTED`. Admin can finalize only requests that both Manager and HR have approved.
 
 See `WEEK15_ENHANCEMENTS.md` for API details, migration behavior, rules and verification steps.
+
+
+## Model A — Manager decision and limited HR veto
+
+The Manager records the first operational approve/reject decision based on workload, staffing, and team priorities. HR must review next. Only a Manager-approved request can be vetoed by HR, and only for `policy_violation`, `insufficient_leave_balance`, or `legal_compliance`; the API requires a selected category and a specific reason. The category, explanation, Manager decision, and HR action are auditable. A Manager rejection can only be confirmed by HR, not converted into an approval. Admin finalization remains blocked until HR clears a Manager approval. See `WEEK15_ENHANCEMENTS.md` for the detailed contract.

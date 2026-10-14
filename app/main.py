@@ -6,12 +6,12 @@ from fastapi.responses import HTMLResponse, FileResponse
 from sqlalchemy import inspect, select, text
 from sqlalchemy.orm import Session
 from .database import Base, engine, get_db
-from .models import UserRole, LeaveStatus
+from .models import UserRole, LeaveStatus, HRVetoCategory
 from .orm_models import Role, User, LeavePolicy, LeaveRequest, AuditLog
 from .schemas import UserCreate, LeaveSubmitInput, ReviewInput, LeavePolicyCreate, LeavePolicyUpdate
 from .security import hash_password, verify_password, create_token, require_roles
 
-app=FastAPI(title='Employee Leave Approval System', version='1.3.0')
+app=FastAPI(title='Employee Leave Approval System', version='1.4.0')
 UPLOAD_DIR=Path(os.getenv('UPLOAD_DIR','uploads')); UPLOAD_DIR.mkdir(exist_ok=True)
 
 @app.on_event('startup')
@@ -57,6 +57,8 @@ def _migrate_existing_database():
         ))
         if 'manager_approved' not in columns:
             connection.execute(text('ALTER TABLE leave_requests ADD COLUMN manager_approved BOOLEAN NULL'))
+        if 'hr_veto_category' not in columns:
+            connection.execute(text('ALTER TABLE leave_requests ADD COLUMN hr_veto_category VARCHAR(50) NULL'))
 
         migration_key = 'week15_manager_first_hr_second_v2'
         applied = connection.execute(
@@ -209,6 +211,7 @@ def list_requests(current_user=Depends(require_roles(UserRole.EMPLOYEE,UserRole.
         'document_name':x.document_name,
         'document_path':x.document_path,
         'hr_comments':x.hr_comments,
+        'hr_veto_category':x.hr_veto_category,
         'manager_comments':x.manager_comments,
         'manager_approved':x.manager_approved,
         'admin_notes':x.admin_notes,
@@ -273,7 +276,7 @@ def dashboard():
           <form id="loginForm" class="form-grid" onsubmit="login(event)"><div class="field wide"><label>Username</label><input name="username" autocomplete="username" required placeholder="employee1"></div><div class="field wide"><label>Password</label><input name="password" type="password" autocomplete="current-password" required></div><div class="wide"><button class="btn primary" style="width:100%">Sign in</button></div></form>
           <form id="registerForm" class="form-grid hidden" onsubmit="register(event)"><div class="field"><label>Username</label><input name="username" required></div><div class="field"><label>Email</label><input name="email" type="email" required></div><div class="field wide"><label>Password</label><input name="password" type="password" minlength="8" required></div><div class="field wide"><label>Role</label><select name="role"><option value="employee">Employee</option><option value="hr">HR</option><option value="manager">Manager</option><option value="admin">Admin</option><option value="super_admin">Super Admin</option></select></div><div class="wide"><button class="btn primary" style="width:100%">Create account</button></div></form><div id="authAlert"></div></div>
       </section>
-      <section class="login-art"><div class="login-art-card"><div class="eyebrow" style="color:#9ab6d8">Approval journey</div><h2 style="font-size:32px;margin:8px 0 20px">See exactly where every request is.</h2><div class="workflow-map"><div class="workflow-node"><strong>1 · Employee</strong><span>Submit a leave request and supporting document.</span></div><div class="workflow-node"><strong>2 · Manager</strong><span>Independently approve or reject first.</span></div><div class="workflow-node"><strong>3 · HR final review</strong><span>Review the Manager decision; HR can veto approval.</span></div><div class="workflow-node"><strong>4 · Admin</strong><span>Make the final authorization decision.</span></div><div class="workflow-node"><strong>5 · Super Admin</strong><span>Dispatch the employee notification.</span></div></div></div></section>
+      <section class="login-art"><div class="login-art-card"><div class="eyebrow" style="color:#9ab6d8">Approval journey</div><h2 style="font-size:32px;margin:8px 0 20px">See exactly where every request is.</h2><div class="workflow-map"><div class="workflow-node"><strong>1 · Employee</strong><span>Submit a leave request and supporting document.</span></div><div class="workflow-node"><strong>2 · Manager</strong><span>Independently approve or reject first.</span></div><div class="workflow-node"><strong>3 · HR limited veto</strong><span>Veto a Manager approval only for policy, leave-balance, or legal/compliance reasons, with a specific explanation.</span></div><div class="workflow-node"><strong>4 · Admin</strong><span>Make the final authorization decision.</span></div><div class="workflow-node"><strong>5 · Super Admin</strong><span>Dispatch the employee notification.</span></div></div></div></section>
     </div><script>
       function showTab(t){document.querySelectorAll('.tabs button').forEach((b,i)=>b.classList.toggle('active',(t==='login'?i===0:i===1)));document.getElementById('loginForm').classList.toggle('hidden',t!=='login');document.getElementById('registerForm').classList.toggle('hidden',t!=='register')}
       async function login(e){e.preventDefault();const f=new FormData(e.target);const r=await fetch('/api/auth/login',{method:'POST',body:f});const j=await r.json();if(!r.ok){document.getElementById('authAlert').innerHTML='<div class="alert error">'+(j.detail||'Login failed')+'</div>';return}localStorage.setItem('leave_token',j.access_token);const m=await fetch('/api/auth/me',{headers:{Authorization:'Bearer '+j.access_token}});const u=await m.json();location.href=u.role==='employee'?'/employee':'/'+u.role.replace('_','-');}
@@ -300,58 +303,118 @@ def current_user(current_user=Depends(require_roles(
     }
 
 @app.patch('/api/leave/{leave_id}/manager-approve')
-def manager_review(leave_id:int,payload:ReviewInput,current_user=Depends(require_roles(UserRole.MANAGER,UserRole.SUPER_ADMIN)),db:Session=Depends(get_db)):
-    leave=db.get(LeaveRequest,leave_id)
-    if not leave: raise HTTPException(404,'Leave request not found')
-    if leave.status!=LeaveStatus.PENDING_MANAGER: raise HTTPException(400,'Request is not pending Manager review')
-    leave.manager_comments=payload.comments
-    leave.manager_approved=payload.approved
-    leave.status=LeaveStatus.PENDING_HR_FINAL
-    action='MANAGER_APPROVED_PENDING_HR_REVIEW' if payload.approved else 'MANAGER_REJECTED_PENDING_HR_REVIEW'
-    audit(db,leave,current_user,action,payload.comments)
+def manager_review(leave_id: int, payload: ReviewInput, current_user=Depends(require_roles(UserRole.MANAGER, UserRole.SUPER_ADMIN)), db: Session = Depends(get_db)):
+    leave = db.get(LeaveRequest, leave_id)
+    if not leave:
+        raise HTTPException(404, 'Leave request not found')
+    if leave.status != LeaveStatus.PENDING_MANAGER:
+        raise HTTPException(400, 'Request is not pending Manager review')
+    if payload.veto_category is not None:
+        raise HTTPException(422, 'Veto categories are reserved for HR vetoes')
+    if len(payload.comments) < 10:
+        raise HTTPException(422, 'Provide a clear Manager rationale (at least 10 characters)')
+
+    leave.manager_comments = payload.comments
+    leave.manager_approved = payload.approved
+    leave.status = LeaveStatus.PENDING_HR_FINAL
+    action = 'MANAGER_APPROVED_PENDING_HR_REVIEW' if payload.approved else 'MANAGER_REJECTED_PENDING_HR_REVIEW'
+    audit(db, leave, current_user, action, payload.comments)
     db.commit()
-    return {'id':leave.id,'status':leave.status.value,'manager_approved':leave.manager_approved,'action':action}
+    return {
+        'id': leave.id,
+        'status': leave.status.value,
+        'manager_approved': leave.manager_approved,
+        'action': action,
+    }
+
 
 @app.patch('/api/leave/{leave_id}/admin-finalize')
-def admin_finalize(leave_id:int,payload:ReviewInput,current_user=Depends(require_roles(UserRole.ADMIN,UserRole.SUPER_ADMIN)),db:Session=Depends(get_db)):
-    leave=db.get(LeaveRequest,leave_id)
-    if not leave: raise HTTPException(404,'Leave request not found')
-    if leave.status!=LeaveStatus.PENDING_ADMIN: raise HTTPException(400,'Request is not pending Admin oversight')
-    leave.admin_notes=payload.comments; leave.status=LeaveStatus.APPROVED if payload.approved else LeaveStatus.REJECTED; audit(db,leave,current_user,'ADMIN_APPROVED' if payload.approved else 'ADMIN_REJECTED',payload.comments); db.commit(); return {'id':leave.id,'status':leave.status.value}
+def admin_finalize(leave_id: int, payload: ReviewInput, current_user=Depends(require_roles(UserRole.ADMIN, UserRole.SUPER_ADMIN)), db: Session = Depends(get_db)):
+    leave = db.get(LeaveRequest, leave_id)
+    if not leave:
+        raise HTTPException(404, 'Leave request not found')
+    if leave.status != LeaveStatus.PENDING_ADMIN:
+        raise HTTPException(400, 'Request is not pending Admin oversight')
+    if payload.veto_category is not None:
+        raise HTTPException(422, 'Veto categories are reserved for HR vetoes')
+
+    leave.admin_notes = payload.comments
+    leave.status = LeaveStatus.APPROVED if payload.approved else LeaveStatus.REJECTED
+    action = 'ADMIN_APPROVED' if payload.approved else 'ADMIN_REJECTED'
+    audit(db, leave, current_user, action, payload.comments)
+    db.commit()
+    return {'id': leave.id, 'status': leave.status.value, 'action': action}
+
 
 @app.post('/api/leave/{leave_id}/notify-employee')
-def notify_employee(leave_id:int,current_user=Depends(require_roles(UserRole.SUPER_ADMIN)),db:Session=Depends(get_db)):
-    leave=db.get(LeaveRequest,leave_id)
-    if not leave: raise HTTPException(404,'Leave request not found')
-    if leave.status not in {LeaveStatus.APPROVED,LeaveStatus.REJECTED}: raise HTTPException(400,'Final decision is required before notification')
-    audit(db,leave,current_user,'EMPLOYEE_NOTIFICATION_DISPATCHED',leave.status.value); db.commit(); return {'message':'Notification dispatched','leave_id':leave.id,'status':leave.status.value}
+def notify_employee(leave_id: int, current_user=Depends(require_roles(UserRole.SUPER_ADMIN)), db: Session = Depends(get_db)):
+    leave = db.get(LeaveRequest, leave_id)
+    if not leave:
+        raise HTTPException(404, 'Leave request not found')
+    if leave.status not in {LeaveStatus.APPROVED, LeaveStatus.REJECTED}:
+        raise HTTPException(400, 'Final decision is required before notification')
+    audit(db, leave, current_user, 'EMPLOYEE_NOTIFICATION_DISPATCHED', leave.status.value)
+    db.commit()
+    return {'message': 'Notification dispatched', 'leave_id': leave.id, 'status': leave.status.value}
+
 
 @app.patch('/api/leave/{leave_id}/hr-review')
-def hr_review(leave_id:int,payload:ReviewInput,current_user=Depends(require_roles(UserRole.HR,UserRole.SUPER_ADMIN)),db:Session=Depends(get_db)):
-    leave=db.get(LeaveRequest,leave_id)
-    if not leave: raise HTTPException(404,'Leave request not found')
+def hr_review(leave_id: int, payload: ReviewInput, current_user=Depends(require_roles(UserRole.HR, UserRole.SUPER_ADMIN)), db: Session = Depends(get_db)):
+    leave = db.get(LeaveRequest, leave_id)
+    if not leave:
+        raise HTTPException(404, 'Leave request not found')
     if leave.status != LeaveStatus.PENDING_HR_FINAL:
-        raise HTTPException(400,'Manager must record an approve/reject decision before HR final review')
+        raise HTTPException(400, 'Manager must record an approve/reject decision before HR final review')
     if leave.manager_approved is None:
-        raise HTTPException(409,'Manager decision is missing; the request must be reviewed by Manager first')
+        raise HTTPException(409, 'Manager decision is missing; the request must be reviewed by Manager first')
 
-    # HR must review every Manager decision. A Manager rejection remains a
-    # rejection; HR may confirm it or reject independently, but cannot turn it
-    # into an approval. After Manager approval, HR can approve onward or veto.
+    # Model A: HR is a limited compliance/policy veto, not a second Manager.
+    # If Manager rejected, HR records a confirmation and cannot reopen it.
     if leave.manager_approved is False:
-        leave.status=LeaveStatus.REJECTED
-        action='HR_CONFIRMED_MANAGER_REJECTION' if payload.approved else 'HR_REJECTED_AFTER_MANAGER_REJECTION'
+        if not payload.approved:
+            raise HTTPException(400, 'HR cannot veto a Manager rejection; confirm the existing rejection')
+        if payload.veto_category is not None:
+            raise HTTPException(422, 'A veto category is only valid when vetoing a Manager approval')
+        leave.status = LeaveStatus.REJECTED
+        leave.hr_veto_category = None
+        action = 'HR_CONFIRMED_MANAGER_REJECTION'
+        audit_comments = payload.comments
     elif payload.approved:
-        leave.status=LeaveStatus.PENDING_ADMIN
-        action='HR_FINAL_REVIEW_APPROVED'
+        if payload.veto_category is not None:
+            raise HTTPException(422, 'Do not supply a veto category when approving for Admin review')
+        leave.status = LeaveStatus.PENDING_ADMIN
+        leave.hr_veto_category = None
+        action = 'HR_FINAL_REVIEW_APPROVED'
+        audit_comments = payload.comments
     else:
-        leave.status=LeaveStatus.REJECTED
-        action='HR_FINAL_REVIEW_REJECTED'
+        if payload.veto_category is None:
+            raise HTTPException(
+                422,
+                'Choose a permitted HR veto category: policy violation, insufficient leave balance, or legal/compliance issue',
+            )
+        if len(payload.comments) < 10:
+            raise HTTPException(422, 'Provide a specific HR veto reason (at least 10 characters)')
 
-    leave.hr_comments=payload.comments
-    audit(db,leave,current_user,action,payload.comments)
+        category_labels = {
+            HRVetoCategory.POLICY_VIOLATION: 'Policy violation',
+            HRVetoCategory.INSUFFICIENT_LEAVE_BALANCE: 'Insufficient leave balance',
+            HRVetoCategory.LEGAL_COMPLIANCE: 'Legal/compliance issue',
+        }
+        leave.status = LeaveStatus.REJECTED
+        leave.hr_veto_category = payload.veto_category.value
+        action = 'HR_VETOED_MANAGER_APPROVAL'
+        audit_comments = f"Veto category: {category_labels[payload.veto_category]}. Reason: {payload.comments}"
+
+    leave.hr_comments = payload.comments
+    audit(db, leave, current_user, action, audit_comments)
     db.commit()
-    return {'id':leave.id,'status':leave.status.value,'action':action,'manager_approved':leave.manager_approved}
+    return {
+        'id': leave.id,
+        'status': leave.status.value,
+        'action': action,
+        'manager_approved': leave.manager_approved,
+        'hr_veto_category': leave.hr_veto_category,
+    }
 
 
 @app.get('/api/leave/types')
