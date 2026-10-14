@@ -220,6 +220,70 @@ def test_leave_balance_reserves_pending_requests_and_prevents_overuse():
     assert "Insufficient TST balance" in second.json()["detail"]
 
 
+
+def test_super_admin_notification_is_recorded_in_request_audit():
+    _, employee_token = _register_unique_user("employee")
+    _, manager_token = _register_unique_user("manager")
+    _, hr_token = _register_unique_user("hr")
+    _, admin_token = _register_unique_user("admin")
+    _, super_admin_token = _register_unique_user("super_admin")
+    start, _ = _weekday_pair()
+
+    submitted = client.post(
+        "/api/leave/submit",
+        data={
+            "start_date": start.isoformat(),
+            "end_date": start.isoformat(),
+            "reason": "Notification audit regression test",
+            "leave_type_code": "CL",
+        },
+        headers={"Authorization": f"Bearer {employee_token}"},
+    )
+    assert submitted.status_code == 200, submitted.text
+    leave_id = submitted.json()["id"]
+
+    manager_result = client.patch(
+        f"/api/leave/{leave_id}/manager-approve",
+        json={"approved": True, "comments": "Approved based on workload and team coverage."},
+        headers={"Authorization": f"Bearer {manager_token}"},
+    )
+    assert manager_result.status_code == 200, manager_result.text
+
+    hr_result = client.patch(
+        f"/api/leave/{leave_id}/hr-review",
+        json={"approved": True, "comments": "No policy or compliance issue found."},
+        headers={"Authorization": f"Bearer {hr_token}"},
+    )
+    assert hr_result.status_code == 200, hr_result.text
+
+    admin_result = client.patch(
+        f"/api/leave/{leave_id}/admin-finalize",
+        json={"approved": True, "comments": "Final authorization approved."},
+        headers={"Authorization": f"Bearer {admin_token}"},
+    )
+    assert admin_result.status_code == 200, admin_result.text
+
+    notification = client.post(
+        f"/api/leave/{leave_id}/notify-employee",
+        headers={"Authorization": f"Bearer {super_admin_token}"},
+    )
+    assert notification.status_code == 200, notification.text
+
+    audit = client.get(
+        f"/api/leave/{leave_id}/audit",
+        headers={"Authorization": f"Bearer {super_admin_token}"},
+    )
+    assert audit.status_code == 200, audit.text
+    notification_event = next(
+        (row for row in audit.json() if "notif" in row["action_performed"].lower()),
+        None,
+    )
+    assert notification_event is not None, audit.json()
+    assert notification_event["action_performed"] == "EMPLOYEE_NOTIFICATION_DISPATCHED"
+    assert notification_event["comments"] == "APPROVED"
+
+
+
 def test_hr_can_veto_after_manager_approval_and_admin_cannot_bypass_it():
     _, employee_token = _register_unique_user("employee")
     _, hr_token = _register_unique_user("hr")

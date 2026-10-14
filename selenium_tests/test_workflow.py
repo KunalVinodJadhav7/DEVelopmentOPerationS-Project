@@ -1195,21 +1195,26 @@ class LeaveApprovalWorkflowTest(unittest.TestCase):
             )
         )
 
-        audit_text = modal_audit.text
-
-        self.assertTrue(
-            any(
-                token in audit_text.lower()
-                for token in (
-                    "notif",
-                    "notify",
-                    "notified",
+        notification_tokens = ("notif", "notify", "notified")
+        try:
+            self.wait.until(
+                lambda driver: any(
+                    token in driver.find_element(By.ID, "modalAudit").text.lower()
+                    for token in notification_tokens
                 )
-            ),
-            (
-                "Notification action was not found in the "
-                f"request audit trail.\n{audit_text}"
-            ),
+            )
+        except TimeoutException:
+            audit_text = self.driver.find_element(By.ID, "modalAudit").text
+            self.fail(
+                "Notification action did not appear in the request audit trail "
+                "within the wait period. Check GET /api/leave/{id}/audit output.\n"
+                f"AUDIT\n{audit_text}"
+            )
+
+        audit_text = modal_audit.text
+        self.assertTrue(
+            any(token in audit_text.lower() for token in notification_tokens),
+            f"Notification action was not found in the request audit trail.\nAUDIT\n{audit_text}",
         )
 
         return toast_text

@@ -1246,8 +1246,10 @@ function viewRequest(id) {
 
 async function loadAudit(id) {
     try {
-        const rows =
-            await api(`/api/leave/${id}/audit`);
+        const rows = await api(
+            `/api/leave/${id}/audit`,
+            { cache: 'no-store' }
+        );
 
         const box = $('#modalAudit');
 
