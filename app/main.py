@@ -2,7 +2,7 @@ import os
 from datetime import date, timedelta
 from pathlib import Path
 from fastapi import Depends, FastAPI, Form, HTTPException, UploadFile, File, status
-from fastapi.responses import HTMLResponse, FileResponse
+from fastapi.responses import HTMLResponse, FileResponse, Response
 from sqlalchemy import inspect, select, text
 from sqlalchemy.orm import Session
 from .database import Base, engine, get_db
@@ -220,7 +220,11 @@ def list_requests(current_user=Depends(require_roles(UserRole.EMPLOYEE,UserRole.
     } for x in rows]
 
 @app.get('/api/leave/{leave_id}/audit')
-def get_audit(leave_id:int,current_user=Depends(require_roles(UserRole.EMPLOYEE,UserRole.HR,UserRole.MANAGER,UserRole.ADMIN,UserRole.SUPER_ADMIN)),db:Session=Depends(get_db)):
+def get_audit(leave_id: int, response: Response, current_user=Depends(require_roles(UserRole.EMPLOYEE, UserRole.HR, UserRole.MANAGER, UserRole.ADMIN, UserRole.SUPER_ADMIN)), db: Session=Depends(get_db)):
+    # Audit data must be read fresh after each decision/notification.
+    response.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'
+    response.headers['Pragma'] = 'no-cache'
+    response.headers['Expires'] = '0'
     leave=db.get(LeaveRequest,leave_id)
     if not leave:
         raise HTTPException(404,'Leave request not found')
@@ -353,9 +357,35 @@ def notify_employee(leave_id: int, current_user=Depends(require_roles(UserRole.S
         raise HTTPException(404, 'Leave request not found')
     if leave.status not in {LeaveStatus.APPROVED, LeaveStatus.REJECTED}:
         raise HTTPException(400, 'Final decision is required before notification')
-    audit(db, leave, current_user, 'EMPLOYEE_NOTIFICATION_DISPATCHED', leave.status.value)
+
+    # Persist the notification event explicitly and verify its values after
+    # reloading the row. Do not return success for an incomplete audit event.
+    notification_action = 'EMPLOYEE_NOTIFICATION_DISPATCHED'
+    notification_status = leave.status.value
+    event = AuditLog(
+        leave_request_id=leave.id,
+        actor_id=current_user.id,
+        action_performed=notification_action,
+        comments=notification_status,
+    )
+    db.add(event)
+    db.flush()
+    db.execute(
+        text('UPDATE audit_logs SET action_performed = :action, comments = :comments WHERE id = :event_id'),
+        {'action': notification_action, 'comments': notification_status, 'event_id': event.id},
+    )
     db.commit()
-    return {'message': 'Notification dispatched', 'leave_id': leave.id, 'status': leave.status.value}
+    db.refresh(event)
+    if event.action_performed != notification_action or event.comments != notification_status:
+        raise HTTPException(500, 'Notification was processed but its audit event could not be verified')
+
+    return {
+        'message': 'Notification dispatched',
+        'leave_id': leave.id,
+        'status': leave.status.value,
+        'audit_event_id': event.id,
+        'audit_action': event.action_performed,
+    }
 
 
 @app.patch('/api/leave/{leave_id}/hr-review')

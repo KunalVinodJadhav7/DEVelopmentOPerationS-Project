@@ -1299,7 +1299,10 @@ async function loadAudit(id) {
       </div>
     `;
     } catch (e) {
-        // Intentionally ignored.
+        const box = $('#modalAudit');
+        if (box) {
+            box.innerHTML = `<div class="eyebrow">Audit</div><div class="alert error">Unable to load audit history: ${escapeHtml(e.message)}</div>`;
+        }
     }
 }
 
