@@ -1,3 +1,4 @@
+import json
 import os
 import unittest
 import uuid
@@ -1247,10 +1248,54 @@ class LeaveApprovalWorkflowTest(unittest.TestCase):
                 )
             )
         except TimeoutException:
+            # Capture the exact browser-side data path before failing. The API
+            # assertion above already passed, so compare the browser's second
+            # response, loaded script URL/helper, and rendered modal DOM.
+            browser_audit_debug = self.driver.execute_async_script(
+                """const leaveId = arguments[0];
+                const done = arguments[arguments.length - 1];
+                const token = localStorage.getItem('leave_token') || '';
+                const modal = document.getElementById('modalAudit');
+                const helper = window.auditActionLabel;
+                const scriptUrls = Array.from(document.scripts)
+                  .map(script => script.src)
+                  .filter(src => src.includes('/frontend/app.js'));
+                const loadedAppScripts = performance.getEntriesByType('resource')
+                  .filter(entry => entry.name.includes('/frontend/app.js'))
+                  .map(entry => entry.name);
+                fetch(`/api/leave/${leaveId}/audit?browser_debug=${Date.now()}`, {
+                  cache: 'no-store',
+                  headers: { Authorization: `Bearer ${token}` }
+                }).then(async response => {
+                  let body;
+                  try { body = await response.json(); }
+                  catch (error) { body = { parse_error: String(error) }; }
+                  const rows = Array.isArray(body) ? body : [];
+                  const notificationRows = rows.filter(row =>
+                    JSON.stringify(row).toLowerCase().includes('notification') ||
+                    row.action_performed === 'EMPLOYEE_NOTIFICATION_DISPATCHED'
+                  );
+                  done({
+                    pageUrl: location.href,
+                    scriptUrls,
+                    loadedAppScripts,
+                    helperType: typeof helper,
+                    helperLabel: typeof helper === 'function'
+                      ? helper({ action_performed: 'EMPLOYEE_NOTIFICATION_DISPATCHED', comments: 'APPROVED' })
+                      : null,
+                    browserFetchStatus: response.status,
+                    notificationRows,
+                    modalText: modal ? modal.innerText : null,
+                    modalHtml: modal ? modal.innerHTML.slice(0, 6000) : null
+                  });
+                }).catch(error => done({ fetchError: String(error) }));""",
+                leave_id,
+            )
             audit_text = self.driver.find_element(By.ID, "modalAudit").text
             self.fail(
                 "Notification action did not appear in the request audit trail "
-                "within the wait period. Check GET /api/leave/{id}/audit output.\n"
+                "within the wait period. Browser-side audit diagnostics follow.\n"
+                f"BROWSER_AUDIT_DEBUG\n{json.dumps(browser_audit_debug, indent=2)}\n"
                 f"AUDIT\n{audit_text}"
             )
 
