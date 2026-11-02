@@ -1246,8 +1246,9 @@ function viewRequest(id) {
 
 async function loadAudit(id) {
     try {
+        // Bypass cached responses so newly created audit events are visible.
         const rows = await api(
-            `/api/leave/${id}/audit`,
+            `/api/leave/${id}/audit?fresh=${Date.now()}`,
             { cache: 'no-store' }
         );
 
@@ -1299,7 +1300,10 @@ async function loadAudit(id) {
       </div>
     `;
     } catch (e) {
-        // Intentionally ignored.
+        const box = $('#modalAudit');
+        if (box) {
+            box.innerHTML = `<div class="eyebrow">Audit</div><div class="alert error">Unable to load audit history: ${escapeHtml(e.message)}</div>`;
+        }
     }
 }
 
