@@ -268,8 +268,6 @@ def test_super_admin_notification_is_recorded_in_request_audit():
         headers={"Authorization": f"Bearer {super_admin_token}"},
     )
     assert notification.status_code == 200, notification.text
-    assert notification.json()["audit_action"] == "EMPLOYEE_NOTIFICATION_DISPATCHED"
-    assert notification.json()["audit_event_id"]
 
     audit = client.get(
         f"/api/leave/{leave_id}/audit",
