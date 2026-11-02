@@ -1244,6 +1244,41 @@ function viewRequest(id) {
     loadAudit(id);
 }
 
+function auditActionLabel(event) {
+    // API versions may expose the action under different field names.
+    const candidates = [
+        event?.action_performed,
+        event?.action,
+        event?.event_type,
+        event?.action_type,
+        event?.event_name,
+        event?.event
+    ];
+    const rawAction = candidates.find(
+        value => typeof value === 'string' && value.trim()
+    );
+
+    if (rawAction) {
+        const normalized = rawAction.trim()
+            .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
+            .replaceAll('_', ' ')
+            .replace(/\s+/g, ' ');
+        const actionCode = normalized.toUpperCase().replace(/\s+/g, '_');
+        const knownLabels = {
+            EMPLOYEE_NOTIFICATION_DISPATCHED: 'Employee Notification Dispatched'
+        };
+        return knownLabels[actionCode] || normalized.replace(/\b\w/g, c => c.toUpperCase());
+    }
+
+    // Preserve a useful label if a serializer nests or renames the action field.
+    const serializedEvent = JSON.stringify(event ?? {}).toLowerCase();
+    if (/employee_notification_dispatched|notification|notified|notify/.test(serializedEvent)) {
+        return 'Employee Notification Dispatched';
+    }
+
+    return 'Workflow Action Recorded';
+}
+
 async function loadAudit(id) {
     try {
         // Bypass cached responses so newly created audit events are visible.
@@ -1256,6 +1291,7 @@ async function loadAudit(id) {
 
         if (!box) return;
 
+        const auditRows = Array.isArray(rows) ? rows : [];
         box.innerHTML = `
       <div class="eyebrow">
         Audit
@@ -1265,28 +1301,21 @@ async function loadAudit(id) {
         class="audit"
         style="margin-top:8px"
       >
-        ${rows
+        ${auditRows
                 .map(
                     a => `
                 <div class="audit-item">
 
                   <strong>
-                    ${escapeHtml(
-                        a.action_performed.replaceAll(
-                            '_',
-                            ' '
-                        )
-                    )}
+                    ${escapeHtml(auditActionLabel(a))}
                   </strong>
 
                   <div>
-                    ${escapeHtml(
-                        a.comments || ''
-                    )}
+                    ${escapeHtml(a.comments || '')}
                   </div>
 
                   <span>
-                    Actor #${escapeHtml(a.actor_id)}
+                    Actor #${escapeHtml(a.actor_id ?? 'System')}
                     ·
                     ${escapeHtml(a.timestamp || '')}
                   </span>
@@ -1296,7 +1325,7 @@ async function loadAudit(id) {
                 )
                 .join('') ||
             '<div class="empty">No audit events yet.</div>'
-            }
+        }
       </div>
     `;
     } catch (e) {
