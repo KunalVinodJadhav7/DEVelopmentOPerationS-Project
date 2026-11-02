@@ -1239,14 +1239,30 @@ class LeaveApprovalWorkflowTest(unittest.TestCase):
             )
         )
 
-        notification_tokens = ("notif", "notify", "notified")
-        try:
-            self.wait.until(
-                lambda driver: any(
-                    token in driver.find_element(By.ID, "modalAudit").text.lower()
-                    for token in notification_tokens
-                )
+        def notification_audit_rendered(driver):
+            """Wait for the notification event and its final status in the modal DOM."""
+            return driver.execute_script(
+                """const modal = document.getElementById('modalAudit');
+                if (!modal) return false;
+                return Array.from(modal.querySelectorAll('.audit-item')).some(item => {
+                  const label = (item.querySelector('strong')?.innerText || '')
+                    .trim().toLowerCase();
+                  const comment = (item.querySelector('div')?.innerText || '')
+                    .trim().toUpperCase();
+                  return label === 'employee notification dispatched' &&
+                    comment === arguments[0];
+                });""",
+                expected_status,
             )
+
+        try:
+            # loadAudit() fills the modal asynchronously after it becomes visible.
+            # Read the rendered DOM directly and allow the request to complete.
+            WebDriverWait(
+                self.driver,
+                30,
+                poll_frequency=0.25,
+            ).until(notification_audit_rendered)
         except TimeoutException:
             # Capture the exact browser-side data path before failing. The API
             # assertion above already passed, so compare the browser's second
@@ -1291,7 +1307,10 @@ class LeaveApprovalWorkflowTest(unittest.TestCase):
                 }).catch(error => done({ fetchError: String(error) }));""",
                 leave_id,
             )
-            audit_text = self.driver.find_element(By.ID, "modalAudit").text
+            audit_text = self.driver.execute_script(
+                """const modal = document.getElementById('modalAudit');
+                return modal ? (modal.innerText || modal.textContent || '') : '';"""
+            )
             self.fail(
                 "Notification action did not appear in the request audit trail "
                 "within the wait period. Browser-side audit diagnostics follow.\n"
@@ -1299,10 +1318,14 @@ class LeaveApprovalWorkflowTest(unittest.TestCase):
                 f"AUDIT\n{audit_text}"
             )
 
-        audit_text = modal_audit.text
+        audit_text = self.driver.execute_script(
+            """const modal = document.getElementById('modalAudit');
+            return modal ? (modal.innerText || modal.textContent || '') : '';"""
+        )
         self.assertTrue(
-            any(token in audit_text.lower() for token in notification_tokens),
-            f"Notification action was not found in the request audit trail.\nAUDIT\n{audit_text}",
+            notification_audit_rendered(self.driver),
+            "The request audit modal did not render the notification event "
+            f"with final status {expected_status}.\nAUDIT\n{audit_text}",
         )
 
         return toast_text
