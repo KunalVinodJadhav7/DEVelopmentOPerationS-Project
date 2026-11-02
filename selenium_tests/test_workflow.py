@@ -14,6 +14,7 @@ from selenium.common.exceptions import (
     NoSuchElementException,
     StaleElementReferenceException,
     TimeoutException,
+    WebDriverException,
 )
 
 
@@ -366,12 +367,17 @@ class LeaveApprovalWorkflowTest(unittest.TestCase):
                 except StaleElementReferenceException:
                     return False
 
-            # During SPA navigation, authAlert can be removed between lookup
-            # and text retrieval. Treat this as a transient state, not failure.
+            # During SPA navigation Chrome may detach the authAlert node
+            # between lookup and text retrieval. Read it in one browser-side
+            # operation and treat a navigation-time WebDriver error as transient.
             try:
-                alert = driver.find_element(By.ID, "authAlert")
-                alert_text = alert.text.strip()
-            except (NoSuchElementException, StaleElementReferenceException):
+                alert_text = driver.execute_script(
+                    """const alert = document.getElementById('authAlert');
+                    return alert
+                      ? (alert.innerText || alert.textContent || '').trim()
+                      : '';"""
+                )
+            except WebDriverException:
                 return False
 
             if not alert_text or alert_text == registration_message:
@@ -1438,40 +1444,93 @@ class LeaveApprovalWorkflowTest(unittest.TestCase):
             By.XPATH,
             ".//button[normalize-space()='View']",
         )
+        leave_id = self.driver.execute_script(
+            r"""const value = arguments[0].getAttribute('onclick') || '';
+            const match = value.match(/viewRequest\((\d+)\)/);
+            return match ? Number(match[1]) : null;""",
+            view_button,
+        )
+        self.assertIsNotNone(leave_id, "Could not determine leave ID for employee audit verification")
 
         self.wait.until(
             lambda driver: view_button.is_enabled()
         )
         view_button.click()
 
-        modal_audit = self.wait.until(
+        self.wait.until(
             EC.visibility_of_element_located(
                 (By.ID, "modalAudit")
             )
         )
 
-        self.wait.until(
-            lambda driver: any(
-                token in driver.find_element(By.ID, "modalAudit").text.lower()
-                for token in ("notif", "notify", "notified")
+        def employee_notification_audit_rendered(driver):
+            """Check the employee's rendered audit DOM without stale WebElements."""
+            return driver.execute_script(
+                """const modal = document.getElementById('modalAudit');
+                if (!modal) return false;
+                return Array.from(modal.querySelectorAll('.audit-item')).some(item => {
+                  const label = (item.querySelector('strong')?.innerText || '')
+                    .trim().toLowerCase();
+                  const comment = (item.querySelector('div')?.innerText || '')
+                    .trim().toUpperCase();
+                  return label === 'employee notification dispatched' &&
+                    comment === arguments[0];
+                });""",
+                expected_status,
             )
-        )
-        audit_text = self.driver.find_element(By.ID, "modalAudit").text
 
+        try:
+            WebDriverWait(
+                self.driver,
+                30,
+                poll_frequency=0.25,
+            ).until(employee_notification_audit_rendered)
+        except TimeoutException:
+            browser_audit_debug = self.driver.execute_async_script(
+                """const leaveId = arguments[0];
+                const done = arguments[arguments.length - 1];
+                const token = localStorage.getItem('leave_token') || '';
+                const modal = document.getElementById('modalAudit');
+                fetch(`/api/leave/${leaveId}/audit?employee_debug=${Date.now()}`, {
+                  cache: 'no-store',
+                  headers: { Authorization: `Bearer ${token}` }
+                }).then(async response => {
+                  let body;
+                  try { body = await response.json(); }
+                  catch (error) { body = { parse_error: String(error) }; }
+                  const rows = Array.isArray(body) ? body : [];
+                  done({
+                    pageUrl: location.href,
+                    fetchStatus: response.status,
+                    notificationRows: rows.filter(row =>
+                      row.action_performed === 'EMPLOYEE_NOTIFICATION_DISPATCHED'
+                    ),
+                    modalText: modal ? (modal.innerText || modal.textContent || '') : null,
+                    modalHtml: modal ? modal.innerHTML.slice(0, 6000) : null
+                  });
+                }).catch(error => done({ fetchError: String(error) }));""",
+                leave_id,
+            )
+            audit_text = self.driver.execute_script(
+                """const modal = document.getElementById('modalAudit');
+                return modal ? (modal.innerText || modal.textContent || '') : '';"""
+            )
+            self.fail(
+                "Employee final-status verification could not find the "
+                "notification entry in the rendered audit modal. "
+                "Browser-side diagnostics follow.\n"
+                f"EMPLOYEE_AUDIT_DEBUG\n{json.dumps(browser_audit_debug, indent=2)}\n"
+                f"AUDIT\n{audit_text}"
+            )
+
+        audit_text = self.driver.execute_script(
+            """const modal = document.getElementById('modalAudit');
+            return modal ? (modal.innerText || modal.textContent || '') : '';"""
+        )
         self.assertTrue(
-            any(
-                token in audit_text.lower()
-                for token in (
-                    "notif",
-                    "notify",
-                    "notified",
-                )
-            ),
-            (
-                "Employee could see the final status, but the "
-                "notification event was not visible in the audit trail.\n"
-                f"{audit_text}"
-            ),
+            employee_notification_audit_rendered(self.driver),
+            "The employee audit modal did not render the notification event "
+            f"with final status {expected_status}.\nAUDIT\n{audit_text}",
         )
 
         return audit_text
